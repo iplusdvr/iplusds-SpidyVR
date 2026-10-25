@@ -1,6 +1,8 @@
 # iplusd's SpidyVR fork
 
-This fork adds recording controls and arm-driven movement features to [SpidyVR](https://github.com/IlyaMez/SpidyVR), the Marvel's Spider-Man Remastered VR mod by Ilya Mezerowsky.
+This fork adds a bunch of new features to [SpidyVR](https://github.com/IlyaMez/SpidyVR), the Marvel's Spider-Man Remastered VR mod by Ilya Mezerowsky. 
+I recommend following the mod’s original GitHub repository, but if you want to try out the features I’ve added before they’re officially released, 
+it’s worth keeping an eye on this page.
 
 ![SpidyVR gameplay](docs/images/iplusd-g1.gif)
 
