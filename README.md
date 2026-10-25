@@ -2,6 +2,8 @@
 
 This fork adds recording controls and arm-driven movement features to [SpidyVR](https://github.com/IlyaMez/SpidyVR), the Marvel's Spider-Man Remastered VR mod by Ilya Mezerowsky.
 
+![SpidyVR gameplay](docs/images/iplusd-g1.gif)
+
 ## What's added
 
 1. **Web Slingshot — new in 0.4.3**
