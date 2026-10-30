@@ -67,14 +67,14 @@ class InFlightStep {
         // The movement module moves the body as far as stepDelta says: a
         // command it shortened (a step much longer than the one before it,
         // at the speed limit) is no collision, and takes no speed away.
-        Vec3 travel = flight ? native_movement::stepDelta(flight->requested, s.dt) : s.achieved * s.dt;
+        Vec3 travel = flight ? native_movement::stepDelta(flight->requested, s.dt,flight->distance) : s.achieved * s.dt;
         // The step that produced the observed velocity: the one observed
         // before this one, or an unobserved one about as long as this one.
         const float took = s.step == step_ + 1 && dt_ > 0 ? dt_ : s.dt;
         if (produced && took > 0) {
             // Collision took this part of the command away. Remove motion into
             // that surface; a projection cannot remove one contact twice.
-            const Vec3 lost = native_movement::stepDelta(produced->requested, took) / took - s.achieved;
+            const Vec3 lost = native_movement::stepDelta(produced->requested, took,produced->distance) / took - s.achieved;
             if (length(lost) > .25f) {
                 const Vec3 into = normalized(lost);
                 velocity -= into * std::max(0.f, dot(velocity, into));
@@ -88,8 +88,8 @@ class InFlightStep {
         return {s.position + travel, velocity, grounded};
     }
     // A submitted command: its velocity and the solver's velocity at its end.
-    void issued(uint64_t serial, Vec3 requested, Vec3 end) {
-        records_[next_++ % records_.size()] = {serial, requested, end};
+    void issued(uint64_t serial, Vec3 requested, Vec3 end,float distance=native_movement::farthestStep) {
+        records_[next_++ % records_.size()] = {serial, requested, end,distance};
     }
     void reset() {
         *this = {};
@@ -99,6 +99,7 @@ class InFlightStep {
     struct Record {
         uint64_t serial{};
         Vec3 requested{}, end{};
+        float distance=native_movement::farthestStep;
     };
     const Record* find(uint64_t serial) const {
         for (const auto& record : records_)
@@ -232,7 +233,7 @@ static_assert(sizeof(Config) == 64 && sizeof(Hand) == 52 && sizeof(Command) == 2
 // Version 8 appends handClimb without changing the upstream phone or arcade
 // fields. Older official settings keep their original layout and meaning.
 struct Settings {
-    uint32_t magic = 0x53575354, version = 10, bytes = sizeof(Settings), grab = 1;
+    uint32_t magic = 0x53575354, version = 15, bytes = sizeof(Settings), grab = 1;
     float maxSpeed = 32;
     uint32_t airWebs = 1;
     float gravity = 6;
@@ -243,16 +244,31 @@ struct Settings {
     uint32_t handClimb{};
     uint32_t webSlingshot{};
     uint32_t betterClimbing{};
+    float slingshotSpeed=32;
+    float webRange=100;
+    uint32_t webSpeed{};
+    // v13's removed wall-catch slot stays reserved so old packet offsets survive.
+    // v14 appends swingAssist; smartAnchor now selects OFF/ON (the former LOW).
+    uint32_t elasticWeb{},smartAnchor=1,softRelease{},retiredWallCatch{},swingAssist{};
+    uint32_t retiredWallCatchPush{},twoHandZip{},ropeSteering{};
 };
 constexpr uint32_t settingsBytesV3 = 28, settingsBytesV4 = 32, settingsBytesV5 = 36, settingsBytesV6 = 40,
-                   settingsBytesV7 = 44, settingsBytesV8 = 48, settingsBytesV9 = 52;
-static_assert(sizeof(Settings) == 56 && offsetof(Settings, walls) == settingsBytesV3 &&
+                   settingsBytesV7 = 44, settingsBytesV8 = 48, settingsBytesV9 = 52, settingsBytesV10 = 56, settingsBytesV11 = 60;
+static_assert(sizeof(Settings) == 100 && offsetof(Settings, walls) == settingsBytesV3 &&
               offsetof(Settings, physical) == settingsBytesV4 &&
               offsetof(Settings, noBlows) == settingsBytesV5 &&
               offsetof(Settings, arcade) == settingsBytesV6 &&
               offsetof(Settings, handClimb) == settingsBytesV7 &&
               offsetof(Settings, webSlingshot) == settingsBytesV8 &&
               offsetof(Settings, betterClimbing) == settingsBytesV9);
+// Separate visual timing packet: the long-standing WebState/Data ABI stays unchanged.
+struct WebFlightData {
+    uint32_t magic=0x57464c54,version=1,bytes=sizeof(WebFlightData),reserved{};
+    uint32_t phases[2]{}; // 0 off, 1 flying, 2 soft catch, 3 fully coupled
+    Vec3 tips[2]{};
+    float durations[2]{},progress[2]{1,1},coupling[2]{};
+};
+static_assert(sizeof(WebFlightData)==72);
 // SpidySlingshotSample: charge in [0, 1], zero after cancel or release.
 struct SlingshotData {
     uint32_t magic = 0x53534c47, version = 1, bytes = sizeof(SlingshotData);
@@ -371,11 +387,21 @@ inline bool validSettings(const Settings& s) {
          (s.version == 7 && s.bytes == settingsBytesV7) ||
          (s.version == 8 && s.bytes == settingsBytesV8) ||
          (s.version == 9 && s.bytes == settingsBytesV9) ||
-         (s.version == 10 && s.bytes == sizeof(Settings))) &&
+         (s.version == 10 && s.bytes == settingsBytesV10) ||
+         (s.version == 11 && s.bytes == settingsBytesV11) ||
+         (s.version == 12 && s.bytes == 68) ||
+         (s.version == 13 && s.bytes == 84) ||
+         (s.version == 14 && s.bytes == 88) ||
+         (s.version == 15 && s.bytes == sizeof(Settings))) &&
         s.grab <= 1 && std::isfinite(s.maxSpeed) && s.maxSpeed > 0 && s.maxSpeed <= motionSpeedLimit &&
         s.airWebs <= 1 && std::isfinite(s.gravity) && s.gravity >= 0 && s.gravity <= maxGravity &&
         s.walls <= 4 && s.physical <= 1 && s.noBlows <= 3 && s.arcade <= 1 && s.handClimb <= 1 &&
-        s.webSlingshot <= 1 && s.betterClimbing <= 1;
+        s.webSlingshot <= 1 && s.betterClimbing <= 1 &&
+        (s.version<11 || (std::isfinite(s.slingshotSpeed)&&s.slingshotSpeed>=20&&s.slingshotSpeed<=300)) &&
+        (s.version<12 || (std::isfinite(s.webRange)&&s.webRange>=10&&s.webRange<=1000&&s.webSpeed<=3)) &&
+        (s.version<13 || (s.elasticWeb<=3 && s.smartAnchor<=3 && s.softRelease<=3 && s.retiredWallCatch<=3)) &&
+        (s.version<14 || (s.smartAnchor<=1 && s.swingAssist<=1 && !s.retiredWallCatch)) &&
+        (s.version<15 || (s.retiredWallCatchPush<=1 && s.twoHandZip<=1 && s.ropeSteering<=1));
 }
 static_assert(sizeof(WebState) == 28 && sizeof(Data) == 272 && offsetof(Data, wall) == 240);
 // The player is in the air: Spidy's own flight, or the game's jump or fall,

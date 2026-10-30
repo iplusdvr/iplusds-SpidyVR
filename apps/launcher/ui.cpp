@@ -311,7 +311,7 @@ void App::poll() {
     // A running game that already holds Spidy: ask once, as the session ends, whether to close it.
     if (sessionRan_ && !sessionRuns && session_.exitCode() == spidy::launcher::kCloseGameExit)
         wantCloseGame_ = true;
-    // The SPIDY VR tab may have changed its own settings in spidy_vr.ini during the session.
+    // The SPIDY VR tab may have changed its own settings in iplusd_vr.ini during the session.
     if (sessionRan_ && !sessionRuns)
         profilesStale_ = true;
     sessionRan_ = sessionRuns;
@@ -1766,7 +1766,7 @@ void App::options(ImVec2 origin, ImVec2 size) {
         }
         ImGui::PopFont();
     };
-    // The settings no launcher option carries, which the game module keeps in spidy_vr.ini (tabOnly_): the
+    // The settings no launcher option carries, which the game module keeps in iplusd_vr.ini (tabOnly_): the
     // tab's own choices, so the two always offer the same steps.
     using spidy::vr_settings::Item;
     bool tabChanged = false;
@@ -1925,7 +1925,7 @@ void App::options(ImVec2 origin, ImVec2 size) {
                 changed = true;
             }
         });
-        // HEIGHT and SEATED (seated.hpp), kept with the tab's own in spidy_vr.ini.
+        // HEIGHT and SEATED (seated.hpp), kept with the tab's own in iplusd_vr.ini.
         option("Height", "Yours: Spider-Man's size, and how high seated play raises you. Auto: from the "
                          "calibration or the headset.",
                S(150), [&] { tabCombo("##height", Item::height); });
@@ -2053,7 +2053,7 @@ void App::options(ImVec2 origin, ImVec2 size) {
     if (changed)
         save();
     if (tabChanged && !saveTabOnly(tabOnly_))
-        profileStatus("Spidy could not save that setting in %APPDATA%\\Spidy\\spidy_vr.ini.", true);
+        profileStatus("Spidy could not save that setting in %APPDATA%\\Spidy\\iplusd_vr.ini.", true);
     ImGui::SetCursorScreenPos(ImVec2(base.x, std::max(columnY[0], columnY[1]) - gap));
     ImGui::Dummy(ImVec2(width, S(6)));
     ImGui::EndChild();
@@ -2193,12 +2193,12 @@ void App::profileCard(float width) {
             o.armLengthMm = kept.armLengthMm;
             o.calibrationPrompt = kept.calibrationPrompt;
             save();
-            // And those spidy_vr.ini keeps.
+            // And those iplusd_vr.ini keeps.
             if (!(tabOnly_ == spidy::vr_settings::Values{})) {
                 if (saveTabOnly({}))
                     tabOnly_ = {};
                 else
-                    profileStatus("Spidy could not reset the settings in %APPDATA%\\Spidy\\spidy_vr.ini.",
+                    profileStatus("Spidy could not reset the settings in %APPDATA%\\Spidy\\iplusd_vr.ini.",
                                   true);
             }
         }

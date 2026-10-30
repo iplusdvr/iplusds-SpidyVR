@@ -136,6 +136,8 @@ void update(float seconds, const Input&, uint32_t busy, uint64_t record, Vec3 fe
 // Input lost focus (a menu, the flat screen, a lost headset): a trigger
 // held through it is no pull when play resumes.
 void cancel();
+// Feed the native traversal effect only during a slingshot flight.
+void slingshotWind(float speed);
 // The gadget wheel: `fire` has the free hand's trigger fire the gadget the
 // game has equipped, from the hand (the web shooter's ball when that is the
 // one, as before; off, always the ball); `equip`, a weapon id from

@@ -642,7 +642,7 @@ fs::path profilePath(const std::string& name) {
 // Beside launcher.ini, where the game module keeps them (game_xr.cpp's tabOnlyPath).
 fs::path tabOnlyPath() {
     const std::wstring appData = knownFolder(FOLDERID_RoamingAppData);
-    return appData.empty() ? fs::path() : fs::path(appData) / L"Spidy" / L"spidy_vr.ini";
+    return appData.empty() ? fs::path() : fs::path(appData) / L"Spidy" / L"iplusd_vr.ini";
 }
 } // namespace
 

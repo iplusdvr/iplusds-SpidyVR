@@ -110,6 +110,21 @@ std::atomic<uint64_t> frames{};
 SRWLOCK lifecycle = SRWLOCK_INIT, updating = SRWLOCK_INIT, queueLock = SRWLOCK_INIT, output = SRWLOCK_INIT;
 bool hooked{};
 void* hooks[3]{};
+void* nativeWindHook{};
+using NativeWind = void(__fastcall*)(void*,float,float,bool,bool);
+NativeWind originalWind{};
+using NativeContrails=void(__fastcall*)(void*,float,int,bool,bool);
+NativeContrails originalContrails{};
+void* nativeContrailsHook{};
+std::atomic<float> slingshotWindSpeed{};
+std::atomic<uint64_t> slingshotWindUntil{};
+struct WindTelemetry {
+    uint32_t magic=0x57494e44,version=1,bytes=sizeof(WindTelemetry),hooked{};
+    int64_t sequence{};
+    uint64_t calls{},heroCalls{},forced{},self{},owner{},hero{},tick{},lease{};
+    float speed{},requested{},dt{};
+    uint32_t gate{},blocked{},transition{},activeBefore{},activeAfter{},effect{};
+};
 Frame originalFrame{};
 Muzzle originalMuzzle{};
 ShotEvent originalShotEvent{};
@@ -821,6 +836,42 @@ void* shotEvent(void* shot, uint64_t hash, void* event, uint64_t r9) {
     }
     return originalShotEvent(shot, hash, event, r9);
 }
+// Hero screen-speed FX, Spider-Man 4.630. The native caller at 864330
+// supplies (component, dt, speed, blocked, transition); the function emits
+// the game's HeroScreenSpeedFXOn/Off events and owns their VFX instances.
+extern "C" __declspec(dllexport) WindTelemetry SpidyNativeWindData;
+WindTelemetry SpidyNativeWindData;
+void __fastcall nativeWind(void* self,float dt,float speed,bool blocked,bool transition) {
+    ++active;
+    auto& d=SpidyNativeWindData;InterlockedIncrement64(&d.sequence);
+    ++d.calls;d.hooked=1;d.self=reinterpret_cast<uintptr_t>(self);
+    d.owner=pointer(d.self+8);d.hero=heroRecord.load(std::memory_order_relaxed);d.tick=GetTickCount64();
+    d.lease=slingshotWindUntil.load(std::memory_order_relaxed);
+    d.speed=speed;d.dt=dt;d.requested=slingshotWindSpeed.load(std::memory_order_relaxed);
+    d.gate=value<uint8_t>(d.self+0x396);d.blocked=blocked;d.transition=transition;
+    d.activeBefore=value<uint8_t>(d.self+0x1b8);
+    const bool own=d.hero && d.owner==d.hero;
+    if(own) ++d.heroCalls;
+    if(enabled && own && d.tick<d.lease) {
+        auto* gate=reinterpret_cast<uint8_t*>(self)+0x396;const auto saved=*gate;*gate=1;
+        originalWind(self,dt,std::max(speed,std::max(24.f,d.requested)),false,false);
+        *gate=saved;++d.forced;
+    } else originalWind(self,dt,speed,blocked,transition);
+    d.activeAfter=value<uint8_t>(d.self+0x1b8);d.effect=value<uint32_t>(d.self+0x1b0);
+    InterlockedIncrement64(&d.sequence);--active;
+}
+// The game's world-space traversal trails are separate from its camera-
+// bound screen effect. The verified 863c70 entry takes (self,dt,trailIndex,
+// enabled,transition) and emits HeroSpeedFXContrailsOn/Off, hash 517399d1.
+// Use those original assets too; no substitute overlay or new particles.
+void __fastcall nativeContrails(void* self,float dt,int index,bool on,bool transition) {
+    ++active;
+    const auto hero=heroRecord.load(std::memory_order_relaxed);
+    const bool flight=enabled && hero && pointer(reinterpret_cast<uintptr_t>(self)+8)==hero &&
+        GetTickCount64()<slingshotWindUntil.load(std::memory_order_relaxed);
+    originalContrails(self,dt,index,flight?true:on,flight?false:transition);
+    --active;
+}
 // The pulls waiting for the main thread, in order.
 void fireQueued() {
     Pending batch[queueSize];
@@ -1017,6 +1068,19 @@ uint32_t game_shooter::start(uintptr_t gameBase) {
             }
             hooked = true;
         }
+        if(!nativeWindHook && entry(0x8639d0,{0x48,0x8b,0xc4,0x48,0x89,0x58,0x08,0x48,0x89,0x68,0x10,0x48,0x89,0x70,0x20})) {
+            auto* target=reinterpret_cast<void*>(base+0x8639d0);
+            if(MH_CreateHook(target,reinterpret_cast<void*>(nativeWind),reinterpret_cast<void**>(&originalWind))==MH_OK)
+                nativeWindHook=target;
+        }
+        if(!nativeContrailsHook && entry(0x863c70,{0x48,0x8b,0xc4,0x48,0x89,0x58,0x08,0x48,0x89,0x68,0x10,0x56,0x57,0x41,0x56})) {
+            auto* target=reinterpret_cast<void*>(base+0x863c70);
+            if(MH_CreateHook(target,reinterpret_cast<void*>(nativeContrails),reinterpret_cast<void**>(&originalContrails))==MH_OK)
+                nativeContrailsHook=target;
+        }
+        if(nativeContrailsHook) MH_EnableHook(nativeContrailsHook);
+        if(nativeWindHook) {const auto ok=MH_EnableHook(nativeWindHook);SpidyNativeWindData.hooked=ok==MH_OK||ok==MH_ERROR_ENABLED;}
+        slingshotWindUntil=0;
         AcquireSRWLockExclusive(&updating);
         shooter.reset();
         ReleaseSRWLockExclusive(&updating);
@@ -1066,6 +1130,9 @@ uint32_t game_shooter::stop() {
     AcquireSRWLockExclusive(&lifecycle);
     enabled = false;
     uint32_t result{};
+    slingshotWindUntil=0;
+    if(nativeWindHook) MH_DisableHook(nativeWindHook);
+    if(nativeContrailsHook) MH_DisableHook(nativeContrailsHook);
     if (hooked)
         for (auto* hook : hooks)
             if (const auto s = MH_DisableHook(hook); s != MH_OK && s != MH_ERROR_DISABLED && !result)
@@ -1164,6 +1231,10 @@ void game_shooter::gadgetWheel(bool fire, uint16_t equip) {
     gadgetFire = fire;
     if (equip)
         equipWanted = equip;
+}
+void game_shooter::slingshotWind(float speed) {
+    if(!std::isfinite(speed)||speed<=0) {slingshotWindUntil=0;return;}
+    slingshotWindSpeed=std::clamp(speed,0.f,300.f);slingshotWindUntil=GetTickCount64()+200;
 }
 void game_shooter::cancel() {
     if (!enabled.load(std::memory_order_relaxed) || !TryAcquireSRWLockShared(&updating))

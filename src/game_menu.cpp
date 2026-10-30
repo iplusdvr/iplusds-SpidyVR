@@ -78,7 +78,7 @@ constexpr uintptr_t openOptionsName = 0x389f4c0, resetAllHash = 0x6d8ed88;
 // The option types of a setting item and of a section heading (vtables).
 constexpr uintptr_t settingType = 0x3a7d6e8, headingType = 0x3a7d838;
 // The tab's id: the game's run 0-10, and its RESET ALL ignores any above.
-constexpr uint32_t tabId = 93;
+constexpr uint32_t tabId = 93, iplusdTabId = 94;
 // The rows' setting numbers: the game's run 0-122.
 constexpr int firstSetting = 0x200;
 constexpr size_t tabBytes = 0x40, itemBytes = 0x88, choiceBytes = 0x50;
@@ -143,11 +143,12 @@ std::atomic<uint32_t> failure{};
 std::atomic<bool> hooked{}, created{};
 // The tab and its items: 0 not built yet, 1 ready, 2 cannot be built.
 std::atomic<int> built{};
-alignas(16) unsigned char tab[tabBytes];
+alignas(16) unsigned char tab[tabBytes], iplusdTab[tabBytes];
 alignas(16) unsigned char items[rowCount][itemBytes];
 // The tab's own items (its Place's rows), and the row on the first page.
 alignas(16) unsigned char tabItems[rowCount][itemBytes];
-size_t tabRows{};
+size_t tabRows{}, iplusdRows{};
+alignas(16) unsigned char iplusdItems[rowCount][itemBytes];
 int pageRow = -1;
 std::atomic<uint64_t> pagesBuilt{};
 // The page's own build is this game's (checked at install): without it VR
@@ -165,7 +166,7 @@ struct Text {
     uint32_t hash;
     const char* text;
 };
-std::array<Text, 2 + rowCount * 2 + rowCount * maxChoices> texts{};
+std::array<Text, 5 + rowCount * 2 + rowCount * maxChoices> texts{};
 size_t textCount{};
 // Indices into texts, sorted by hash.
 std::array<uint16_t, std::size(texts)> byHash{};
@@ -187,7 +188,7 @@ const Text* addText(const char* tag, const char* text) {
     ++textCount;
     return &t;
 }
-const Text *tabName{}, *tabHeading{};
+const Text *tabName{}, *tabHeading{}, *iplusdName{}, *iplusdHeading{};
 const Text *titles[rowCount]{}, *helps[rowCount]{};
 // The first page's button's name, which says what A does (pageTitles).
 Text* pageTitle{};
@@ -197,6 +198,8 @@ void addTexts() {
         return;
     tabName = addText("SPIDY_VR_TAB", "SPIDY VR");
     tabHeading = addText("SPIDY_VR_HEADING", "SPIDY VR SETTINGS");
+    iplusdName=addText("IPLUSD_SETTINGS_TAB","iplusd's Experimental Settings");
+    iplusdHeading=addText("IPLUSD_SETTINGS_HEAD","iplusd's Experimental Settings");
     char tag[24];
     for (size_t r = 0; r < rowCount; ++r) {
         const auto& row = vr_settings::rows()[r];
@@ -299,13 +302,16 @@ uint32_t buildItems() {
             }
         }
         // The tab's rows, and the one for the first page; the launcher's own are in neither.
-        tabRows = 0;
+        tabRows = 0; iplusdRows=0;
         pageRow = -1;
         for (size_t r = 0; r < rowCount; ++r)
             if (vr_settings::rows()[r].place == vr_settings::Place::page)
                 pageRow = static_cast<int>(r);
             else if (vr_settings::rows()[r].place == vr_settings::Place::tab)
                 std::memcpy(tabItems[tabRows++], items[r], itemBytes);
+            else if(vr_settings::rows()[r].place==vr_settings::Place::iplusd)
+                std::memcpy(iplusdItems[iplusdRows++],items[r],itemBytes);
+
         std::memcpy(tab, reinterpret_cast<const void*>(menu), tabBytes);
         put<uint32_t>(tab, 8, tabId);
         putText(tab, 0x10, tabName);
@@ -313,6 +319,12 @@ uint32_t buildItems() {
         put<uint64_t>(tab, 0x30, reinterpret_cast<uint64_t>(tabItems));
         put<uint32_t>(tab, 0x38, static_cast<uint32_t>(tabRows));
         put<uint32_t>(tab, 0x3c, static_cast<uint32_t>(tabRows));
+        std::memcpy(iplusdTab,tab,tabBytes);
+        put<uint32_t>(iplusdTab,8,iplusdTabId);
+        putText(iplusdTab,0x10,iplusdName); putText(iplusdTab,0x20,iplusdHeading);
+        put<uint64_t>(iplusdTab,0x30,reinterpret_cast<uint64_t>(iplusdItems));
+        put<uint32_t>(iplusdTab,0x38,static_cast<uint32_t>(iplusdRows));
+        put<uint32_t>(iplusdTab,0x3c,static_cast<uint32_t>(iplusdRows));
         return 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return 9501;
@@ -336,6 +348,7 @@ void addTab(GfxValue& tabs) {
     if (!ready())
         return;
     __try {
+        for(const auto* menu : {iplusdTab,tab}) {
         GfxValue value{};
         std::memset(value.head, 0xff, sizeof(value.head));
         void* movie = reinterpret_cast<void*(__fastcall*)()>(imageBase + uiMovie)();
@@ -343,11 +356,12 @@ void addTab(GfxValue& tabs) {
             return;
         buildingTab = true;
         const bool made =
-            reinterpret_cast<bool(__fastcall*)(GfxValue*, void*, const void*)>(imageBase + buildTab)(&value, movie, tab);
+            reinterpret_cast<bool(__fastcall*)(GfxValue*, void*, const void*)>(imageBase + buildTab)(&value, movie, menu);
         buildingTab = false;
         if (made && pushBack(tabs, value))
             ++tabsBuilt;
         releaseValue(value);
+        }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         // Not again this session; the game's own tabs go on.
         buildingTab = false;
@@ -460,10 +474,10 @@ void __fastcall callbackHook(void* ui, uint32_t hash, GfxValue* args, uint32_t c
     }
     // Y RESET ALL on the SPIDY VR tab: the game's RESET ALL takes only its own tabs.
     if (built == 1 && args && count >= 1 && (args[0].type & typeMask) == intType &&
-        static_cast<uint32_t>(args[0].data) == tabId && hash == get<uint32_t>(imageBase + resetAllHash)) {
+        (static_cast<uint32_t>(args[0].data) == tabId || static_cast<uint32_t>(args[0].data) == iplusdTabId) && hash == get<uint32_t>(imageBase + resetAllHash)) {
         // The tab's own rows: VR VIEW is on the first page, and the launcher keeps its own.
         for (size_t r = 0; r < rowCount; ++r)
-            if (vr_settings::rows()[r].place == vr_settings::Place::tab)
+            if (vr_settings::rows()[r].place == (static_cast<uint32_t>(args[0].data)==iplusdTabId?vr_settings::Place::iplusd:vr_settings::Place::tab))
                 change(itemOf(static_cast<int>(r)), vr_settings::defaultChoice(itemOf(static_cast<int>(r))));
         // Built again, every tab shows its values, as after the game's own RESET ALL.
         reinterpret_cast<void(__fastcall*)(void*)>(imageBase + openOptions)(ui);

@@ -99,6 +99,10 @@ struct Values {
     // eye. An angle renders the game's own view again for the window, which
     // costs frame time and leaves Spidy's drawings out of the window.
     int recordingFov = 0;
+    int recordingSmoothing = 0, slingshotSpeed = 32;
+    int webRange=100, webSpeed=0;
+    int elasticWeb=0, smartAnchor=1, softRelease=0, swingAssist=0;
+    int twoHandZip=0,ropeSteering=0;
     // Realistic flips, experimental (the tab's REALISTIC FLIPS and the ten
     // rows under it; RealisticFlipSettings, which holds what each means): the
     // swing's flight and the arms turn the player in the air, and A there
@@ -234,15 +238,27 @@ enum class Item : uint8_t {
     controlledFlips,
     combatVisuals,
     eyeAim,
+    recordingSmoothing,
+    slingshotSpeed,
+    webRange,
+    webSpeed,
+    elasticWeb,
+    smartAnchor,
+    softRelease,
+    swingAssist,
+    twoHandZip,
+    ropeSteering,
+
+
 };
-inline constexpr Item lastItem = Item::eyeAim;
+inline constexpr Item lastItem = Item::ropeSteering;
 // Where a row shows: in the tab; on the pause menu's first page instead,
 // under RESUME: VR VIEW (the user, October 15: "move the VIEW: GAME SCREEN to
 // the first menu (the one with resume)"); or only in the launcher's options:
 // the realistic flips' finest tuning, its thresholds and how a spin builds
 // and dies away (the user, October 25: "cleanup the redundant"). The tab's
 // RESET ALL leaves the last two alone.
-enum class Place : uint8_t { tab, page, launcher };
+enum class Place : uint8_t { tab, page, launcher, iplusd };
 // The SPIDY VR tab, top to bottom: a section's heading (item none) or a
 // setting. The sections: WEBS, SWINGING, COMFORT, HAPTICS, DISPLAY, BODY and
 // EXPERIMENTAL (the player, October 19: "sort the options in spidy vr
@@ -258,10 +274,10 @@ struct Row {
     std::span<const char* const> choices{};
     Place place{};
 };
-const std::array<Row, 52>& rows();
+const std::array<Row, 70>& rows();
 // The most choices a row shows (game_menu's buffers): a row with more would
 // lose its last ones.
-inline constexpr size_t maxChoices = 9;
+inline constexpr size_t maxChoices = 21;
 // The values a list setting's choices stand for, in their order; none for a
 // switch.
 std::span<const int> steps(Item);

@@ -23,6 +23,7 @@
 #include "spidy/vr_settings.hpp"
 #include "spidy/recording_fov.hpp"
 #include "spidy/native_stream.hpp"
+#include "spidy/spectator_smoothing.hpp"
 #include "spidy/body_haptics.hpp"
 #include "spidy/web_visual.hpp"
 #include "spidy/web_pull.hpp"
@@ -652,6 +653,409 @@ int main() {
             tick();
         }
     };
+    test("building aim assistance catches nearby surfaces but keeps direct hits and air anchors", [] {
+        TestWorld world; const Vec3 aimDirection=normalized(Vec3{0,1,0});
+        world.anchor=normalized(Vec3{0,1,-.14054f})*80;
+        Swing solver(inert());solver.allowAirAnchors(false);
+        auto in=aimed();const auto assisted=solver.shot(in.hands[0].aim,{},world);
+        check(assisted.web && !assisted.web->airAnchor,"nearby real building not acquired");
+        near(length(assisted.web->anchor-world.anchor),0);
+        solver.allowAirAnchors(true);
+        const auto air=solver.shot(in.hands[0].aim,{},world);
+        check(air.web && air.web->airAnchor,"air targeting unexpectedly redirected");
+        world.anchor={0,80,0};const auto direct=solver.shot(in.hands[0].aim,{},world);
+        check(direct.web && !direct.web->airAnchor,"direct building lost priority");
+    });
+    test("flying web flutter holds both endpoints and settles at arrival", [] {
+        const Vec3 start{},end{0,0,-100};
+        for(float age:{0.f,.3f,1.f}) {
+            near(length(flyingWebPoint(start,end,0,age,.4f)-start),0);
+            near(length(flyingWebPoint(start,end,1,age,.4f)-end),0,.0001f);
+            near(length(flyingWebPoint(start,end,.4f,age,1)-end*.4f),0);
+        }
+        check(length(flyingWebPoint(start,end,.4f,.1f,.4f)-flyingWebPoint(start,end,.4f,.3f,.4f))>.01f,"flight strand never moves");
+    });
+    test("new settings save every OFF and strength choice in their own tab", [] {
+        using namespace vr_settings;
+        for(Item item:{Item::elasticWeb,Item::smartAnchor,Item::softRelease,Item::swingAssist,Item::twoHandZip,Item::ropeSteering}) {
+            for(int level=0;level<(item!=Item::elasticWeb&&item!=Item::softRelease?2:4);++level) {
+                Values value;choose(item,level,value);
+                const auto restored=withTabOnly(Values{},tabOnlyText(value));
+                check(choice(item,restored)==level,"new setting did not persist");
+            }
+        }
+        game_swing::Settings packet;
+        check(game_swing::validSettings(packet),"new settings refused");
+        for(int field=0;field<4;++field) {
+            auto invalid=packet;
+            if(field==0)invalid.elasticWeb=4;if(field==1)invalid.smartAnchor=4;
+            if(field==2)invalid.softRelease=4;if(field==3)invalid.swingAssist=2;
+            check(!game_swing::validSettings(invalid),"invalid strength accepted");
+        }
+        for(int feature=0;feature<3;++feature) {
+            auto invalid=packet;
+            if(feature==0)invalid.retiredWallCatchPush=2;
+            if(feature==1)invalid.twoHandZip=2;
+            if(feature==2)invalid.ropeSteering=2;
+            check(!game_swing::validSettings(invalid),"invalid gesture toggle accepted");
+        }
+        packet.version=14;packet.bytes=88;check(game_swing::validSettings(packet),"old assist settings refused");
+        packet.version=12;packet.bytes=68;check(game_swing::validSettings(packet),"old travel settings refused");
+    });
+    test("elastic webs catch a moving body without a hard position correction", [] {
+        for(int strength=1;strength<=3;++strength) {
+            TestWorld world;Swing solver(inert());solver.comfort(strength,0,0);
+            auto input=aimed();input.hands[0].trigger=0;
+            Body body{{0,0,0},{0,-20,0},false};float initial=body.velocity.y;
+            bool loaded=false;
+            for(int frame=0;frame<240;++frame) {
+                const auto result=solver.predictNativeStep(.01f,input,world,body);
+                check(result.valid && finite(result.velocity),"elastic solver invalid");
+                check(length(result.target-(body.position+body.velocity*.01f))<.025f,"elastic rope snapped position");
+                check(length(result.velocity-body.velocity)<=1.801f,"elastic catch exceeded force limit");
+                loaded|=solver.webs()[0].tension>1;
+                body={result.target,result.velocity,false};
+            }
+            check(loaded && body.velocity.y>initial+10,"elastic rope failed to catch body");
+        }
+    });
+    test("soft release carries a bounded fading pull then returns to free flight", [] {
+        TestWorld world;auto config=inert();config.gravity=9.81f;Swing solver(config);solver.comfort(0,0,3);
+        auto input=aimed();input.hands[0].trigger=0;Body body{{},{0,-8,0},false};
+        auto result=solver.predictNativeStep(.01f,input,world,body);
+        check(solver.webs()[0].tension>0,"test never loaded rope");
+        body={result.target,result.velocity,false};input.hands[0].grip=0;
+        result=solver.predictNativeStep(.01f,input,world,body);
+        check(!solver.webs()[0].attached && result.velocity.y>body.velocity.y-.09f,"no release tail");
+        check(result.velocity.y-body.velocity.y<.5f,"release tail was an impulse");
+        for(int frame=0;frame<40;++frame) {body={result.target,result.velocity,false};result=solver.predictNativeStep(.01f,input,world,body);}
+        body={result.target,result.velocity,false};result=solver.predictNativeStep(.01f,input,world,body);
+        near(result.velocity.y-body.velocity.y,-.0981f,.0001f);
+        solver.releaseAll();body={{},{},false};result=solver.predictNativeStep(.01f,input,world,body);
+        near(result.velocity.y,-.0981f,.0001f);
+    });
+    test("smart anchoring can be disabled and never invents a surface", [] {
+        TestWorld world;world.anchor=normalized(Vec3{0,1,-.14054f})*80;
+        Swing solver(inert());solver.allowAirAnchors(false);auto input=aimed();
+        solver.comfort(0,0,0);check(!solver.shot(input.hands[0].aim,{},world).web,"OFF still assisted");
+        solver.comfort(0,1,0);check(solver.shot(input.hands[0].aim,{},world).web.has_value(),"ON missed nearby surface");
+        world.enabled=false;check(!solver.shot(input.hands[0].aim,{},world).web,"assistance invented an air anchor");
+    });
+    test("swing assist brakes before a broad wall without teleporting or adding speed", [] {
+        struct Facade:TestWorld {
+            std::optional<RayHit> bodyRaycast(Vec3 from,Vec3 direction,float reach) const override {
+                if(direction.x<=0)return {};
+                const float t=(5-from.x)/direction.x;
+                if(t>=0 && t<=reach)return RayHit{from+direction*t,{-1,0,0},2,true};
+                return {};
+            }
+        } world;
+        world.anchor={100,5,0};Swing solver(inert());solver.allowSwingAssist(true);
+        Body body{{0,5,0},{10,0,0},false};auto input=aimedAt(body.position,world.anchor);
+        float closest=0;
+        for(int frame=0;frame<250;++frame) {
+            input.hands[0].aim.position=body.position;
+            const auto result=solver.predictNativeStep(.01f,input,world,body);
+            check(result.valid && finite(result.target),"assist prediction invalid");
+            check(length(result.velocity)<=10.01f,"assist added travel speed");
+            check(length(result.target-body.position)<=.101f,"assist teleported body");
+            check(length(result.velocity-body.velocity)<1.2f,"assist changed heading abruptly");
+            closest=std::max(closest,result.target.x);body={result.target,result.velocity,false};
+        }
+        check(closest<4.7f,"assist crossed broad wall");
+    });
+    test("swing assist preserves the player lateral motion instead of choosing a lane", [] {
+        Building world;world.low={5,0,-2};world.high={10,30,2};
+        Swing solver(inert());solver.allowSwingAssist(true);
+        Body body{{0,5,0},{10,0,1.5f},false};auto input=aimedAt(body.position,{100,5,0});
+        bool braking=false;
+        for(int frame=0;frame<300;++frame) {
+            input.hands[0].aim.position=body.position;
+            const auto result=solver.predictNativeStep(.01f,input,world,body);
+            check(result.valid,"lane prediction invalid");
+            const auto p=result.target;
+            check(!(p.x>4.65f && p.x<10.35f && std::abs(p.z)<2.35f && p.y<30.35f),"assist entered building capsule clearance");
+            braking|=result.velocity.x<8;
+            near(result.velocity.y,0,.001f);
+            check(result.velocity.z>=0 && result.velocity.z<=1.501f,"assist invented lateral speed");
+            body={result.target,result.velocity,false};
+        }
+        check(braking,"assist failed to reduce approach speed");
+    });
+    test("swing assist OFF and clear air preserve old motion; pending webs exert no aid", [] {
+        struct Queries:TestWorld {
+            mutable int bodyQueries{};
+            std::optional<RayHit> bodyRaycast(Vec3,Vec3,float) const override {++bodyQueries;return {};}
+        } world;
+        world.anchor={0,100,0};Swing old(inert()),off(inert()),on(inert());off.allowSwingAssist(false);on.allowSwingAssist(true);
+        Body body{{0,5,0},{10,0,0},false};auto input=aimedAt(body.position,world.anchor);
+        const auto a=old.predictNativeStep(.01f,input,world,body),b=off.predictNativeStep(.01f,input,world,body),c=on.predictNativeStep(.01f,input,world,body);
+        near(length(a.target-b.target),0,1e-6f);near(length(a.velocity-b.velocity),0,1e-6f);
+        near(length(a.target-c.target),0,1e-6f);near(length(a.velocity-c.velocity),0,1e-6f);
+        check(world.bodyQueries==5,"clear-air aid exceeded five lookahead queries");
+        world.bodyQueries=0;Swing pending(inert());pending.webTravel(500,1);pending.allowSwingAssist(true);
+        pending.predictNativeStep(.01f,input,world,body);
+        check(!pending.webs()[0].ready() && world.bodyQueries==0,"assist acted before first web arrived");
+    });
+    test("flight visuals advance smoothly between slower physics samples", [] {
+        WebFlightVisual visual;const Vec3 start{},end{0,0,-300};float before=0;
+        for(int frame=0;frame<360;++frame) {
+            const float physicalAge=(frame/3)/30.f;
+            const float progress=physicalAge/5.f;
+            visual.update(1.f/90,1,5,progress,start+(end-start)*progress,end);
+            const float advance=visual.progress()*300-before;
+            check(advance>=0 && advance<.85f,"visual tip jumped between physics frames");
+            if(frame>0)check(advance>.3f,"visual tip froze between samples");
+            before=visual.progress()*300;
+            near(length(visual.direction()-Vec3{0,0,-1}),0,.0001f);
+        }
+        visual.update(.01f,0,0,0,{},{});check(!visual.flying(),"released web kept animating");
+    });
+    test("fixed shot basis keeps flutter continuous when the wrist crosses the old basis threshold", [] {
+        const Vec3 axis=normalized(Vec3{0,.9f,-.435f});
+        const Vec3 a=flyingWebPoint({},axis*40,.4f,.6f,.3f,axis);
+        const Vec3 moved{0,.01f,0};
+        const Vec3 b=flyingWebPoint(moved,axis*40,.4f,.6f,.3f,axis);
+        check(length(b-a)<.02f,"flutter changed sides as wrist moved");
+    });
+    test("assist at a head-on wall adds no sideways or upward movement", [] {
+        struct Facade:TestWorld {
+            std::optional<RayHit> bodyRaycast(Vec3 from,Vec3 d,float reach) const override {
+                if(d.x<=0)return {};const float t=(5-from.x)/d.x;
+                if(t>=0 && t<=reach)return RayHit{from+d*t,{-1,0,0},2,true};return {};
+            }
+        } world;
+        world.anchor={100,5,0};Swing solver(inert());solver.allowSwingAssist(true);
+        Body body{{0,5,0},{12,0,0},false};auto input=aimedAt(body.position,world.anchor);
+        for(int frame=0;frame<180;++frame) {
+            const auto result=solver.predictNativeStep(.01f,input,world,body);
+            near(result.velocity.z,0,.0001f);
+            check(result.velocity.y<.2f,"assist lifted player into an invented route");
+            check(result.target.x<4.7f,"assist failed to brake before wall");
+            body={result.target,result.velocity,false};
+        }
+    });
+    struct TwinZipTest {
+        TestWorld world;Swing solver{inert()};Input in;Body body{{},{},false};unsigned zips{};
+        TwinZipTest(bool enabled=true) {
+            world.anchor={0,0,-30};solver.allowGestures(enabled,false);
+            for(int i=0;i<2;++i) {
+                in.hands[i].tracked=true;in.hands[i].grip=1;
+                in.hands[i].gripRelativeToHead={i?.2f:-.2f,0,-.35f};
+                in.hands[i].aim={{i?.2f:-.2f,0,0},arc({0,0,-1},normalized(world.anchor-Vec3{i?.2f:-.2f,0,0}))};
+            }
+            in.look={0,0,-1};step();
+        }
+        void step(float inputTime=.02f) {
+            const auto result=solver.predictNativeStep(.02f,in,world,body,inputTime);
+            check(result.valid,"zip prediction failed");
+            for(const auto& e:solver.events())zips+=e.kind==EventKind::Zip;
+            body={result.target,result.velocity,body.grounded};
+        }
+        void pull(float distance) {for(auto& h:in.hands)h.gripRelativeToHead.z+=distance;step();}
+    };
+    test("two hand zip uses both retractions once and scales with the arm speed", [] {
+        TwinZipTest medium,strong;
+        for(int i=0;i<5;++i)medium.pull(.028f);
+        for(int i=0;i<3;++i)strong.pull(.05f);
+        check(medium.zips==1 && strong.zips==1,"two-hand gesture missed or duplicated zip");
+        check(-strong.body.velocity.z>-medium.body.velocity.z+3,"stronger pull did not launch harder");
+        for(int i=0;i<30;++i)strong.step(0);
+        check(strong.zips==1,"repeated input relaunched the zip");
+    });
+    test("two hand zip rejects one-arm, slow, tracking-gap and yaw-change gestures", [] {
+        TwinZipTest one,slow,gap,yaw;
+        for(int i=0;i<8;++i) {one.in.hands[0].gripRelativeToHead.z+=.04f;one.step();slow.pull(.01f);}
+        check(one.zips==0 && slow.zips==0,"unintentional arm motion zipped");
+        gap.pull(.05f);gap.in.hands[1].tracked=false;gap.step();
+        gap.in.hands[1].tracked=true;gap.pull(.3f);check(gap.zips==0,"tracking gap created a zip");
+        yaw.pull(.05f);yaw.in.trackingYaw=.5f;yaw.pull(.2f);check(yaw.zips==0,"snap turn created a zip");
+    });
+    test("two hand zip waits for real arrival and requests native ground takeoff", [] {
+        TwinZipTest airborne;airborne.solver.releaseAll();airborne.solver.webTravel(100,1);
+        airborne.in.hands[0].grip=airborne.in.hands[1].grip=0;airborne.step();
+        airborne.in.hands[0].grip=airborne.in.hands[1].grip=1;airborne.step();
+        for(int i=0;i<3;++i)airborne.pull(.05f);
+        check(airborne.zips==0 && !airborne.solver.webs()[0].ready(),"zip acted before arrival");
+        TwinZipTest floor;floor.body.grounded=true;
+        for(int i=0;i<3;++i)floor.pull(.05f);
+        check(floor.zips==1 && floor.solver.gestureTakeoff(),"ground zip did not request native jump");
+        check(floor.solver.gestureLaunch().z<-5,"ground handoff lost launch velocity");
+    });
+    test("turning gestures OFF clears a queued launch and does not replay it", [] {
+        TwinZipTest state;state.body.grounded=true;
+        for(int i=0;i<3;++i)state.pull(.05f);
+        check(state.solver.gestureTakeoff(),"test did not queue a takeoff");
+        state.solver.allowGestures(false,false);
+        check(!state.solver.gestureTakeoff(),"OFF retained a queued launch");
+        near(length(state.solver.gestureLaunch()),0);
+        const unsigned before=state.zips;
+        for(int i=0;i<20;++i)state.step();
+        check(state.zips==before,"OFF replayed the launch");
+    });
+    test("sideways rope steering turns existing momentum only while sharing a strand", [] {
+        TestWorld world;Swing on(inert()),off(inert());on.allowGestures(false,true);
+        Input input=aimed();input.hands[0].trigger=0;
+        input.hands[1]={input.hands[0].aim,{0,.3f,0},true,0,0};
+        Body a{{},{0,0,-10},false},b=a;
+        auto step=[&] {
+            const auto x=on.predictNativeStep(.01f,input,world,a),y=off.predictNativeStep(.01f,input,world,b);
+            a={x.target,x.velocity,false};b={y.target,y.velocity,false};
+        };
+        step();input.hands[1].grip=1;step();check(on.shared(),"free hand did not take the rope");
+        for(int i=0;i<10;++i) {input.hands[1].gripRelativeToHead.x+=.02f;step();}
+        check(a.velocity.x>b.velocity.x+1,"sideways pull did not steer");
+        check(length(a.velocity)<10.1f,"rope steering manufactured speed");
+        input.hands[1].grip=0;step();check(!on.shared(),"released hand kept steering grip");
+    });
+    test("web travel has distance-dependent duration and one shared visible/physical arrival", [] {
+        const float speeds[]{0,60,150,350};
+        for(int mode=1;mode<=3;++mode)for(float distance : {10.f,100.f,500.f}) {
+            TestWorld world;world.anchor={0,distance,0};
+            spidy::Swing solver(inert());solver.allowAirAnchors(false);solver.webTravel(1000,mode);
+            auto in=aimed();in.hands[0].trigger=0;const Body body{{0,0,0},{},false};
+            float elapsed=0;unsigned attached=0;
+            for(int frame=0;frame<1000;++frame) {
+                solver.predictNativeStep(.01f,in,world,body);elapsed+=.01f;
+                for(const auto& event:solver.events())attached+=event.kind==EventKind::Attach;
+                const auto& web=solver.webs()[0];
+                check(web.attached,"shot missed its test surface");
+                near(web.flightTotal,distance/speeds[mode],.001f);
+                near(web.tip().y,std::min(distance,elapsed*speeds[mode]),.02f);
+                if(web.ready()) {
+                    check(attached==1,"arrival event missing or duplicated");
+                    check(elapsed>=web.flightTotal-.011f && elapsed<=web.flightTotal+.011f,"incorrect arrival time");
+                    check(web.coupling()<.011f,"arrival applied full rope force");break;
+                }
+                check(attached==0,"attached before the visible tip arrived");near(web.tension,0);
+                check(frame<999,"web never arrived");
+            }
+        }
+    });
+    test("a flying web exerts no force and releasing it cannot attach later", [] {
+        TestWorld world;world.anchor={0,100,0};spidy::Swing solver(inert());solver.webTravel(500,1);
+        auto in=aimed();in.hands[0].trigger=0;Body body{{0,0,0},{3,-8,0},false};
+        for(int i=0;i<50;++i) {
+            const auto next=solver.predictNativeStep(.01f,in,world,body);
+            check(next.valid && !solver.webs()[0].ready(),"flight ended early");
+            near(length(next.velocity-body.velocity),0,.001f);
+            near(length(next.target-(body.position+body.velocity*.01f)),0,.001f);
+            near(solver.webs()[0].tension,0);body={next.target,next.velocity,false};
+        }
+        in.hands[0].grip=0;
+        for(int i=0;i<200;++i) {
+            const auto next=solver.predictNativeStep(.01f,in,world,body);body={next.target,next.velocity,false};
+            check(!solver.webs()[0].attached,"released shot reappeared");
+            for(const auto& event:solver.events())check(event.kind!=EventKind::Attach,"late ghost attachment");
+        }
+    });
+    test("the soft web catch limits acceleration and never snaps to the firing position", [] {
+        TestWorld world;world.anchor={0,100,0};spidy::Swing solver(inert());solver.webTravel(500,1);
+        auto in=aimed();in.hands[0].trigger=0;Body body{{0,0,0},{0,-35,0},false};
+        bool arrived=false,finished=false;float lastGain=0;
+        for(int i=0;i<300;++i) {
+            const auto next=solver.predictNativeStep(.01f,in,world,body);
+            check(next.valid,"soft catch invalidated prediction");const auto& web=solver.webs()[0];
+            check(web.attached,"soft catch lost its anchor");
+            const float delta=length(next.velocity-body.velocity);
+            check(delta<=1.601f,"single-frame catch exceeded the acceleration budget");
+            check(length(next.target-(body.position+body.velocity*.01f))<.021f,"catch teleported the player");
+            if(web.ready()) {
+                arrived=true;check(web.coupling()+1e-5f>=lastGain,"catch gain went backwards");lastGain=web.coupling();
+                finished|=!web.catching;
+            } else near(delta,0,.001f);
+            body={next.target,next.velocity,false};
+        }
+        check(arrived && finished,"soft catch never converged to ordinary rope physics");
+    });
+    test("simultaneous web arrivals share the soft catch without a two-rope position snap", [] {
+        TwoAnchors world;world.anchors[0]={-10,100,-30};world.anchors[1]={10,100,-30};
+        spidy::Swing solver(inert());solver.webTravel(500,2);
+        Input in;
+        for(int i=0;i<2;++i) {
+            in.hands[i].tracked=true;in.hands[i].grip=1;
+            in.hands[i].gripRelativeToHead={i?.4f:-.4f,0,0};
+            in.hands[i].aim.position=in.hands[i].gripRelativeToHead;
+            in.hands[i].aim.orientation=arc({0,0,-1},normalized(world.anchors[i]-in.hands[i].aim.position));
+        }
+        Body body{{0,0,0},{0,-35,0},false};bool arrived=false;
+        for(int i=0;i<220;++i) {
+            const auto next=solver.predictNativeStep(.01f,in,world,body);
+            check(next.valid && solver.webs()[0].attached && solver.webs()[1].attached,"dual shot failed");
+            check(length(next.velocity-body.velocity)<3.202f,"dual arrival exceeded the force budget");
+            check(length(next.target-(body.position+body.velocity*.01f))<.025f,"dual catch teleported the body");
+            arrived|=solver.webs()[0].ready()&&solver.webs()[1].ready();
+            body={next.target,next.velocity,false};
+        }
+        check(arrived,"dual shot never arrived");
+    });
+    test("a web with zero coupling cannot add angular momentum", [] {
+        spidy::RealisticFlip free,contact;
+        RealisticFlipSettings settings;settings.enabled=true;
+        RealisticFlight flight;flight.valid=true;flight.velocity={0,0,-15};flight.handMomentum={1,0,0};
+        for(int i=0;i<50;++i) {free.update(flight,true,false,0,.01f,settings);contact.update(flight,true,false,0,.01f,settings);}
+        flight.handMomentum={};
+        for(int i=0;i<20;++i) {
+            const auto a=free.update(flight,true,false,0,.01f,settings);
+            auto incoming=flight;incoming.attached=true;incoming.pull={1,1,0};incoming.coupling=0;
+            const auto b=contact.update(incoming,true,false,0,.01f,settings);
+            near(a.x,b.x,1e-6f);near(a.y,b.y,1e-6f);near(a.z,b.z,1e-6f);near(a.w,b.w,1e-6f);
+        }
+    });
+    test("web speed OFF preserves the existing physics frame for frame", [] {
+        TestWorld world;spidy::Swing legacy(inert()),off(inert());off.webTravel(100,0);
+        auto in=aimed();in.hands[0].trigger=0;Body a{{0,0,0},{3,-4,0},false},b=a;
+        for(int i=0;i<180;++i) {
+            if(i==120)in.hands[0].grip=0;
+            const auto x=legacy.predictNativeStep(.01f,in,world,a),y=off.predictNativeStep(.01f,in,world,b);
+            check(x.valid && y.valid,"legacy prediction failed");
+            near(length(x.target-y.target),0,1e-6f);near(length(x.velocity-y.velocity),0,1e-6f);
+            if(i==0)check(off.webs()[0].ready() && off.webs()[0].coupling()==1,"OFF delayed the old attachment");
+            a={x.target,x.velocity,false};b={y.target,y.velocity,false};
+        }
+    });
+    test("web range reaches real distant surfaces and settings append without breaking old packets", [] {
+        TestWorld world;world.anchor={0,300,0};spidy::Swing solver(inert());solver.allowAirAnchors(false);
+        auto in=aimed();check(!solver.shot(in.hands[0].aim,{0,0,0},world).web,"old range reached 300 m");
+        solver.webTravel(500,2);const auto shot=solver.shot(in.hands[0].aim,{0,0,0},world);
+        check(shot.web && !shot.web->airAnchor,"extended range missed the real surface");
+        near(shot.web->anchor.y,300);
+        game_swing::Settings packet;
+        check(packet.version==15 && packet.bytes==100 && offsetof(game_swing::Settings,webRange)==60,"new settings layout incorrect");
+        for(int mode=0;mode<=3;++mode) {packet.webSpeed=mode;check(game_swing::validSettings(packet),"valid speed rejected");}
+        packet.webSpeed=4;check(!game_swing::validSettings(packet),"invalid speed accepted");packet.webSpeed=0;
+        packet.webRange=1001;check(!game_swing::validSettings(packet),"invalid range accepted");
+        packet.version=11;packet.bytes=60;check(game_swing::validSettings(packet),"old settings packet rejected");
+        native_rays::Command rays;rays.count=1;rays.serial=1;rays.rays[0]={{0,0,0},1000,{0,1,0},0};
+        check(native_rays::valid(rays),"native ray limit does not support the menu range");
+    });
+    test("web range and speed modes round trip through menu and saved settings", [] {
+        using namespace vr_settings;Values value;
+        check(value.webRange==100 && value.webSpeed==0,"web experiments started enabled");
+        for(int mode=0;mode<4;++mode)for(int range=0;range<12;++range) {
+            choose(Item::webSpeed,mode,value);choose(Item::webRange,range,value);
+            const auto read=withTabOnly(Values{},tabOnlyText(value));
+            check(read.webSpeed==mode && read.webRange==value.webRange,"new settings did not save");
+            check(choice(Item::webSpeed,read)==mode && choice(Item::webRange,read)==range,"new setting choice did not round trip");
+        }
+    });
+    test("selected slingshot speed bypasses only the ordinary swing cap and resets on landing", [] {
+        for(float speed : {20.f,32.f,65.f,100.f,200.f,300.f}) {
+            Sling s;s.solver.setSlingshotSpeed(speed);s.draw();
+            for(int i=0;i<60;++i)s.tick();
+            s.release();check(s.fired(),"charged launch did not fire");
+            check(length(s.last.velocity)>speed*.99f && length(s.last.velocity)<=speed+.01f,"selected launch speed was capped");
+            check(s.solver.slingshotFlying(),"launch lost flight state");
+            s.body={s.last.target,s.last.velocity,false};s.tick();
+            s.body={s.last.target,{},true};s.tick();
+            check(!s.solver.slingshotFlying(),"landing kept the boosted speed limit");
+            near(s.solver.speedLimit(),s.solver.config().maxSpeed);
+        }
+        native_movement::Command packet;packet.version=2;packet.reserved2=1;
+        check(native_movement::validCommandVersion(packet),"opt-in swept step refused");
+        near(length(native_movement::stepDelta({300,0,0},.02f,native_movement::commandDistance(packet))),6);
+        packet.version=1;check(!native_movement::validCommandVersion(packet),"legacy packet accepted a new flag");
+    });
     test("slingshot draws two fixed webs and launches once, capped, toward their midpoint", [] {
         Sling s;
         s.solver.limitSpeed(25);
@@ -661,7 +1065,7 @@ int main() {
                           [](const Event& e) { return e.kind == EventKind::Zip; }), "draw caused ordinary zip");
         s.release();
         check(s.fired() && s.last.velocity.z < -15 && s.last.velocity.y > 0, "no forward launch");
-        check(length(s.last.velocity) <= 25.001f, "launch exceeded the chosen swing limit");
+        check(length(s.last.velocity)>25 && length(s.last.velocity)<=32.001f,"launch ignored independent slingshot speed");
         near(s.solver.slingshotCharge(), 0);
         s.tick();
         check(!s.fired(), "held release repeated the launch");
@@ -726,7 +1130,7 @@ int main() {
     });
     test("slingshot settings append to the old wire format and default off", [] {
         game_swing::Settings s;
-        check(s.version == 10 && s.bytes == 56 && !s.webSlingshot, "wrong slingshot defaults");
+        check(s.version == 15 && s.bytes == 100 && !s.webSlingshot, "wrong slingshot defaults");
         check(offsetof(game_swing::Settings, webSlingshot) == 48, "old settings moved");
         s.webSlingshot = 1; check(game_swing::validSettings(s), "ON refused");
         s.webSlingshot = 2; check(!game_swing::validSettings(s), "invalid switch accepted");
@@ -1207,6 +1611,75 @@ int main() {
         check(std::min(swing.webs()[0].length, swing.webs()[1].length) < retained - .15f,
               "another hand-over-hand stroke made no progress");
     });
+    test("better climbing pulls an open-air web after every travel mode", [physical] {
+        for(int mode=0;mode<=3;++mode) {
+        TestWorld world; world.enabled=false;
+        Swing swing(physical());
+        swing.allowBetterClimbing(true);
+        swing.allowAirAnchors(true); swing.webTravel(25,mode);
+        auto in = aimed(); in.hands[0].trigger = 0;
+        in.hands[1] = {in.hands[0].aim, {0, .3f, 0}, true, 0, 0};
+        Body body{{}, {}, false};
+        auto intent = swing.predictNativeStep(1.f / 90, in, world, body);
+        auto step = [&] {
+            body = {intent.target, intent.velocity, false};
+            intent = swing.predictNativeStep(1.f / 90, in, world, body);
+            check(intent.valid, "climbing prediction failed");
+            for (const auto& e : swing.events())
+                check(e.kind != EventKind::Zip, "climbing became a yank impulse");
+        };
+        for(int frame=0;frame<100;++frame) step();
+        check(swing.webs()[0].airAnchor && swing.webs()[0].ready(), "air web never arrived");
+        step(); in.hands[1].grip = 1; step();
+        check(swing.shared(), "two hands did not share the web");
+        for (int i = 0; i < 30; ++i) { in.hands[1].gripRelativeToHead.y -= .01f; step(); }
+        check(intent.target.y > .5f, "hand pull did not take in the rope");
+        const float before = intent.target.y;
+        in.hands[1].grip = 0; step();
+        for (int i = 0; i < 25; ++i) { intent.velocity = {}; step(); }
+        check(intent.target.y > before - .05f, "the remaining hand lost the gained height");
+        const float retained = swing.webs()[0].length;
+        // Reach forward with the free hand, grip the same strand and pull again.
+        in.hands[1].gripRelativeToHead.y += .4f; step();
+        in.hands[1].grip = 1; step();
+        check(swing.shared(), "free hand could not regrip the strand");
+        for (int i = 0; i < 25; ++i) { in.hands[1].gripRelativeToHead.y -= .01f; step(); }
+        check(std::min(swing.webs()[0].length, swing.webs()[1].length) < retained - .15f,
+              "another hand-over-hand stroke made no progress");
+        }
+    });
+    test("an upward rope pull asks the native jump to start climbing from the ground", [physical] {
+        TestWorld world;spidy::Swing solver(physical());solver.allowBetterClimbing(true);
+        solver.allowSlingshot(true);
+        auto in=aimed();in.hands[0].trigger=0;
+        in.hands[1]={in.hands[0].aim,{0,.3f,0},true,0,0};
+        const Body actual{{0,1,0},{},true};
+        auto step=[&] {return solver.predictNativeStep(.01f,in,world,actual);};
+        step();step();in.hands[1].grip=1;step();
+        check(solver.shared(),"two-hand hold failed on the ground");
+        check(!solver.climbTakeoff(),"just gripping caused a jump");
+        in.hands[1].gripRelativeToHead.y-=.03f;step();
+        check(solver.climbTakeoff() && !in.jump,"rope pull still required the jump button");
+        SwingTakeoff native;
+        native.update(1000,true,true,true,solver.climbTakeoff(),true,actual.position,{},{});
+        const auto takeoff=native.update(1080,true,true,true,solver.climbTakeoff(),false,actual.position,{},{});
+        check(takeoff.jump,"native takeoff was not requested");
+        solver.releaseAll();check(!solver.climbTakeoff(),"released rope kept a takeoff request");
+    });
+    test("zero hand momentum is persisted and applies no arm torque", [] {
+        using namespace vr_settings;
+        Values v;choose(Item::automaticHandStrength,0,v);
+        check(v.automaticHandStrength==0 && withTabOnly(Values{},tabOnlyText(v)).automaticHandStrength==0,"zero strength did not save");
+        spidy::RealisticFlip zero,strong;
+        RealisticFlipSettings settings;settings.enabled=true;settings.handStrength=0;
+        RealisticFlight flight;flight.valid=true;flight.velocity={0,0,-10};flight.handMomentum={2,0,0};
+        for(int i=0;i<100;++i) {
+            zero.update(flight,true,false,0,.01f,settings);
+            settings.handStrength=100;strong.update(flight,true,false,0,.01f,settings);settings.handStrength=0;
+        }
+        check(length(zero.angularVelocity())<1e-5f,"zero still applied arm torque");
+        check(length(strong.angularVelocity())>.05f,"control case generated no arm torque");
+    });
     test("better climbing ignores repeated poses and tracking gaps, and can be switched off", [physical] {
         TestWorld world;
         Swing swing(physical()); swing.allowBetterClimbing(true);
@@ -1239,7 +1712,7 @@ int main() {
         check(vr_settings::choose(vr_settings::Item::betterClimbing, 1, v), "ON failed");
         check(vr_settings::withTabOnly({}, vr_settings::tabOnlyText(v)).betterClimbing, "switch not saved");
         game_swing::Settings s;
-        check(s.version == 10 && s.bytes == 56 && offsetof(game_swing::Settings, betterClimbing) == 52,
+        check(s.version == 15 && s.bytes == 100 && offsetof(game_swing::Settings, betterClimbing) == 52,
               "settings moved old fields");
         s.betterClimbing = 1; check(game_swing::validSettings(s), "ON refused");
         s.betterClimbing = 2; check(!game_swing::validSettings(s), "invalid switch accepted");
@@ -1539,6 +2012,24 @@ int main() {
         Swing old(inert());old.predictNativeStep(1.f/90,in,w,body);
         old.payOut({6,0,0},.1f);
         near(old.webs()[0].length,20,.001f);
+    });
+    test("better climbing consumes a grip moved onto the strand in the same input sample", [physical] {
+        TestWorld world;spidy::Swing solver(physical());solver.allowBetterClimbing(true);
+        auto in=aimed();in.hands[0].trigger=0;
+        in.hands[1]={in.hands[0].aim,{1,.3f,0},true,0,0};
+        const Body body{{0,0,0},{},false};
+        solver.predictNativeStep(1.f/90,in,world,body);
+        solver.predictNativeStep(1.f/90,in,world,body);
+        check(!solver.onStrand(1),"old sample was not outside the rope");
+        in.hands[1].gripRelativeToHead.x=0;in.hands[1].grip=1;
+        check(solver.onStrand(1,in),"current hand pose missed the rope");
+        solver.predictNativeStep(1.f/90,in,world,body);
+        bool joined=false,shot=false;
+        for(const auto& event:solver.events()) {
+            joined|=event.kind==EventKind::Join && event.hand==1;
+            shot|=event.kind==EventKind::Attach && event.hand==1;
+        }
+        check(joined && !shot && solver.shared(),"climbing grip fired another web");
     });
     test("a press with the free hand on the other hand's web takes hold of that web", [physical] {
         for(const bool ropes:{true,false}) {
@@ -2575,7 +3066,7 @@ int main() {
     });
     test("grip climbing settings keep old packets and reject invalid versions, sizes and switches", [] {
         using namespace game_swing;
-        for (uint32_t version = 3; version <= 10; ++version) {
+        for (uint32_t version = 3; version <= 11; ++version) {
             Settings s;
             s.version = version;
             s.bytes = 16 + 4 * version; // official v3=28 through custom v10=56
@@ -2595,7 +3086,7 @@ int main() {
     test("merged settings keep phone suppression, arcade webs and hand climbing independent", [] {
         using namespace game_swing;
         Settings s;
-        check(s.version == 10 && s.bytes == 56, "updated settings did not append the climbing field");
+        check(s.version == 15 && s.bytes == 100, "updated settings did not append the climbing field");
         check(offsetof(Settings, noBlows) == 36 && offsetof(Settings, arcade) == 40 &&
               offsetof(Settings, handClimb) == 44, "upstream phone or arcade fields moved");
         s.noBlows = 3;
@@ -7681,7 +8172,7 @@ int main() {
         bad=c; bad.rays[0].direction={0,-2,0}; check(!native_rays::valid(bad),"scaled ray accepted");
         bad=c; bad.rays[0].origin.x=std::numeric_limits<float>::infinity();
         check(!native_rays::valid(bad),"infinite origin accepted");
-        bad=c; bad.rays[0].distance=151; check(!native_rays::valid(bad),"excessive range accepted");
+        bad=c; bad.rays[0].distance=8193; check(!native_rays::valid(bad),"excessive range accepted");
         c.count=0; c.leaseMs=0; check(native_rays::valid(c),"cancel command rejected");
     });
     test("controller rays retain hand identity and disappear on tracking loss", [] {
@@ -20634,75 +21125,29 @@ int main() {
               "NaN assist accepted");
         check(!bad([](ShooterConfig&) {}), "defaults rejected");
     });
-    test("VR settings tab: seven sections, every setting once, a list's choices one per step", [] {
+    test("official and iplusd settings use separate native tabs with related headings", [] {
         using namespace vr_settings;
-        const auto& all = rows();
-        check(all[8].item == Item::webSlingshot, "slingshot missing under SWINGING");
-        check(all[9].item == Item::betterClimbing, "better climbing missing under SWINGING");
-        uint64_t seen = 0;
-        unsigned headings = 0;
-        static_assert(static_cast<unsigned>(lastItem) < 63, "more settings than the test's bits");
-        for (const auto& row : all) {
-            check(row.title && *row.title, "a row without a title");
-            for (const char* c = row.title; *c; ++c)
-                check(!(*c >= 'a' && *c <= 'z'), "a title not in upper case, as the game's own");
-            if (row.item == Item::none) {
-                check(!row.help && row.choices.empty(), "a heading with help or choices");
-                ++headings;
+        uint64_t seen{};size_t customHeadings=0,officialHeadings=0;
+        for(const auto& row:rows()) {
+            if(row.item==Item::none) {
+                if(row.place==Place::iplusd)++customHeadings;else ++officialHeadings;
                 continue;
             }
-            const uint64_t bit = uint64_t{1} << static_cast<unsigned>(row.item);
-            check(!(seen & bit), "a setting twice");
-            seen |= bit;
-            check(row.help && std::strlen(row.help) <= 80, "help missing, or too long for the game's column");
-            check(row.choices.size() <= maxChoices, "more choices than the tab shows");
-            for (const char* c : row.choices)
-                check(c && *c, "an empty choice");
+            const auto bit=uint64_t{1}<<static_cast<unsigned>(row.item);
+            check(!(seen&bit),"duplicate row");seen|=bit;
+            check(row.choices.size()<=maxChoices,"choice truncated by native buffer");
+            check(row.choices.empty() || row.choices.size()==steps(row.item).size() || (steps(row.item).empty() && row.choices.size()==2),"choice labels do not match values");
+            check(row.help && std::strlen(row.help)<=80,"help exceeds the game's column");
+            const bool custom=row.item>=Item::elasticWeb || row.item==Item::automaticCombat || row.item==Item::webRange || row.item==Item::webSpeed || row.item==Item::recordingFov || row.item==Item::recordingSmoothing || row.item==Item::nearClip ||
+                row.item==Item::webSlingshot || row.item==Item::slingshotSpeed || row.item==Item::betterClimbing ||
+                (row.item>=Item::realisticFlips && row.item<=Item::automaticAirBrake);
+            check((row.place==Place::iplusd)==custom,"setting is in the wrong owner's tab");
+            if(row.item==Item::recordingFov) {
+                const auto i=&row-rows().data();check(rows()[i+1].item==Item::recordingSmoothing,"smoothing not immediately below FOV");
+            }
         }
-        // The sections (the player, October 19: "sort the options in spidy vr
-        // settings ingame into nice sections"), each with a setting in the tab.
-        const std::pair<size_t, const char*> sections[] = {{0, "WEBS"},     {5, "SWINGING"}, {10, "COMFORT"},
-                                                           {13, "HAPTICS"}, {21, "DISPLAY"}, {30, "BODY"},
-                                                           {34, "EXPERIMENTAL"}};
-        check(headings == std::size(sections),
-              "the sections: webs, swinging, comfort, haptics, display, body, experimental");
-        for (const auto& [at, title] : sections) {
-            check(all[at].item == Item::none && std::strcmp(all[at].title, title) == 0, "a section out of place");
-            size_t next = at + 1;
-            while (next < all.size() && all[next].place != Place::tab)
-                ++next;
-            check(next < all.size() && all[next].item != Item::none, "a section with no setting in the tab");
-        }
-        // BODY: the calibration, then your height and seated play (the user, October 23: "add proper height
-        // calibration or override for seated mode").
-        check(all[31].item == Item::calibrate && all[32].item == Item::height &&
-                  all[32].choices.size() == std::size(heights) && std::strcmp(all[32].choices[0], "AUTO") == 0 &&
-                  std::strcmp(all[32].choices[8], "190 CM") == 0 && all[33].item == Item::seated &&
-                  all[33].choices.empty(),
-              "BODY: CALIBRATE BODY, then HEIGHT (AUTO, 150 to 190 cm), then SEATED, a switch");
-        check(all[35].item == Item::flips && all[35].choices.empty() && std::strcmp(all[34].title, "EXPERIMENTAL") == 0,
-              "the flips: a switch under EXPERIMENTAL");
-        check(all[37].item == Item::flipSpeed && all[37].choices.size() == std::size(flipSpeeds),
-              "the flip speed under the flips");
-        check(all[38].item == Item::handClimb && all[38].choices.empty(),
-              "hand wall climbing switch under the flips");
-        const Item realistic[] = {Item::realisticFlips,        Item::automaticStrength,    Item::automaticSpeed,
-                                  Item::automaticMinimumSpeed, Item::automaticReleaseFlip, Item::automaticResponse,
-                                  Item::automaticHandStrength, Item::automaticFalloff,     Item::automaticHandThreshold,
-                                  Item::automaticAirBrake,     Item::automaticCombat};
-        check(all.size() == 41 + std::size(realistic), "the realistic flips' rows are not the last");
-        for (size_t i = 0; i < std::size(realistic); ++i)
-            check(all[41 + i].item == realistic[i], "the realistic flips' rows out of order");
-        check(std::strcmp(all[41].title, "REALISTIC FLIPS") == 0 && all[41].choices.empty(),
-              "realistic flips: a switch, first of its rows");
-        check(all[36].item == Item::controlledFlips && all[39].item == Item::wallRunCameraTilt, "custom switches misplaced");
-        // EYE AIM, before the realistic flips: what the eyes aim, off by default (only a headset that tracks
-        // the eyes can).
-        check(all[40].item == Item::eyeAim && std::strcmp(all[40].title, "EYE AIM") == 0 &&
-                  all[40].choices.size() == 4 && std::strcmp(all[40].choices[0], "OFF") == 0 &&
-                  std::strcmp(all[40].choices[1], "WEB BALLS") == 0 && std::strcmp(all[40].choices[2], "ZIPS") == 0 &&
-                  std::strcmp(all[40].choices[3], "BOTH") == 0 && all[40].place == Place::tab,
-              "EYE AIM: OFF, WEB BALLS, ZIPS, BOTH, in the tab before the realistic flips");
+        check(seen==((uint64_t{2}<<static_cast<unsigned>(lastItem))-2),"missing setting");
+        check(customHeadings==8 && officialHeadings==7,"group count changed");
         {
             Values v;
             check(v.eyeAim == 0 && defaultChoice(Item::eyeAim) == 0, "eye aim on by default");
@@ -20716,93 +21161,10 @@ int main() {
                   "spidy_vr.ini keeps EYE AIM as eye_aim, within its range");
         }
 
-        // The wall view has no row of its own (the player, October 14: "i dont
-        // get why we have a wall run and a wall stand options where wall run
-        // actually controlls wheter i stand or crawl", then "also merge the
-        // two options"), nor the wall camera's distance (October 24); since
-        // October 25 neither is a setting at all.
-        for (const auto& row : all)
-            check(std::strcmp(row.title, "STAND ON WALLS") != 0 &&
-                      std::strcmp(row.title, "WALL CAMERA DISTANCE") != 0,
-                  "the wall view or the wall camera's distance has a row again");
-        check(all[23].item == Item::screenSize && all[25].item == Item::hud && all[25].choices.size() == 4 &&
-                  std::strcmp(all[25].choices[0], "OFF") == 0 && std::strcmp(all[25].choices[3], "LARGE") == 0,
-              "the HUD after the game screen's rows: OFF, SMALL, MEDIUM, LARGE");
-        check(all[24].item == Item::screenDepth && std::strcmp(all[24].title, "GAME SCREEN 3D") == 0 &&
-                  all[24].choices.size() == 4 && std::strcmp(all[24].choices[0], "OFF") == 0 &&
-                  std::strcmp(all[24].choices[3], "HIGH") == 0,
-              "the game screen's depth under its size: OFF, LOW, MEDIUM, HIGH");
-        // The marks' look after the HUD (the player, October 21: "an optional alternative set of our custom
-        // ingame vr ui in more scifi techy style like the base game ui"): the printed ones first.
-        check(all[26].item == Item::uiStyle && std::strcmp(all[26].title, "UI STYLE") == 0 &&
-                  all[26].choices.size() == 2 && std::strcmp(all[26].choices[0], "COMIC") == 0 &&
-                  std::strcmp(all[26].choices[1], "TECH") == 0,
-              "the UI style after the HUD: COMIC, or TECH");
-        check(all[28].item == Item::nearClip && std::strcmp(all[28].title, "NEAR CLIP") == 0 &&
-                  all[28].choices.size() == std::size(nearClips) && std::strcmp(all[28].choices[6], "10 CM") == 0,
-              "the near clip under the UI style: 1 to 10 cm");
-        check(all[29].item == Item::recordingFov && std::strcmp(all[29].title, "RECORDING FOV") == 0 &&
-                  all[29].choices.size() == std::size(recording_fov::choices) &&
-                  std::strcmp(all[29].choices[0], "OFF") == 0 && std::strcmp(all[29].choices[3], "150\xC2\xB0") == 0,
-              "the recording FOV last under DISPLAY: OFF, then 130 to 150 degrees");
-        // Webs are always physical (the user, October 15: "remove non physical web, no need for it").
-        for (const auto& row : all)
-            check(std::strcmp(row.title, "PHYSICAL WEBS") != 0, "webs can still be made non-physical");
-        check(all[22].item == Item::view && std::strcmp(all[22].title, "VR VIEW") == 0 && all[22].choices.size() == 2 &&
-                  std::strcmp(all[22].choices[0], "VR") == 0 && std::strcmp(all[22].choices[1], "GAME SCREEN") == 0,
-              "the view above the game screen's rows: VR, or GAME SCREEN");
-        // VR VIEW is on the pause menu's first page, beside RESUME, and no other row is; the realistic
-        // flips' thresholds and how a spin builds and dies away are the launcher's alone (the user,
-        // October 25: "cleanup the redundant"). The other 43 rows are the tab's.
-        for (const auto& row : all) {
-            const bool launcherOnly =
-                row.item == Item::automaticMinimumSpeed || row.item == Item::automaticResponse ||
-                row.item == Item::automaticFalloff || row.item == Item::automaticHandThreshold;
-            check(row.place == (row.item == Item::view ? Place::page
-                                : launcherOnly           ? Place::launcher
-                                                         : Place::tab),
-                  "a row in the wrong place");
+        for(Item item:{Item::wallRunCameraTilt,Item::controlledFlips,Item::combatVisuals,Item::eyeAim}) {
+            const auto row=std::find_if(rows().begin(),rows().end(),[&](const Row& r){return r.item==item;});
+            check(row!=rows().end() && row->place==Place::tab,"upstream 0.6 setting missing from SPIDY VR");
         }
-        check(std::count_if(all.begin(), all.end(), [](const Row& r) { return r.place == Place::tab; }) == 47,
-              "the tab's own rows");
-        check(all[1].item == Item::webStyle && std::strcmp(all[1].title, "WEB STYLE") == 0 &&
-                  all[1].choices.size() == 2 && std::strcmp(all[1].choices[0], "REALISTIC") == 0 &&
-                  std::strcmp(all[1].choices[1], "ARCADE") == 0,
-              "the web style first under WEBS: REALISTIC, or ARCADE");
-        check(all[2].item == Item::webButton && all[2].choices.size() == 2 &&
-                  std::strcmp(all[2].choices[0], "GRIP") == 0 && std::strcmp(all[2].choices[1], "TRIGGER") == 0,
-              "the web button under the web style: GRIP, or TRIGGER");
-        check(all[3].item == Item::aimMarkers && all[4].item == Item::airWebs, "the aim markers, then the air webs");
-        check(all[6].item == Item::swingSpeed && all[7].item == Item::weight, "SWINGING: the swing speed, the weight");
-        check(all[11].item == Item::snapTurn && all[12].item == Item::smoothTurn, "COMFORT: snap and smooth turning");
-        // HAPTICS (October 20): the controllers' vibration, the bHaptics level and its four groups' switches.
-        check(all[15].item == Item::blowSounds && std::strcmp(all[15].title, "BLOW SOUNDS") == 0 &&
-                  all[15].choices.size() == 3 && std::strcmp(all[15].choices[0], "GAME") == 0 &&
-                  std::strcmp(all[15].choices[2], "OFF") == 0,
-              "BLOW SOUNDS under the vibration: GAME, SPIDY or OFF");
-        check(all[14].item == Item::haptics && all[16].item == Item::bodyHaptics &&
-                  std::strcmp(all[16].title, "BODY HAPTICS") == 0 && all[17].item == Item::hapticWebs &&
-                  all[18].item == Item::hapticWind && all[19].item == Item::hapticCombat &&
-                  all[20].item == Item::hapticMovement && all[17].choices.empty() && all[20].choices.empty(),
-              "HAPTICS: the vibration, body haptics, then the web, wind, combat and movement switches");
-        check(all[31].item == Item::calibrate && all[31].choices.size() == 2 &&
-                  std::strcmp(all[31].choices[1], "ON RESUME") == 0,
-              "the body's calibration: NO, or ON RESUME");
-        // Every setting has a row.
-        constexpr uint64_t everySetting = (uint64_t{2} << static_cast<unsigned>(lastItem)) - 2;
-        check(seen == everySetting, "a setting missing");
-        auto choicesOf = [&](Item item) {
-            return std::find_if(all.begin(), all.end(), [&](const Row& r) { return r.item == item; })->choices.size();
-        };
-        check(choicesOf(Item::swingSpeed) == std::size(swingSpeeds) && choicesOf(Item::snapTurn) == std::size(snapTurns) &&
-                  choicesOf(Item::smoothTurn) == std::size(smoothTurns) &&
-                  choicesOf(Item::haptics) == std::size(hapticLevels) &&
-                  choicesOf(Item::bodyHaptics) == std::size(hapticLevels) && choicesOf(Item::screenSize) == 3 &&
-                  choicesOf(Item::weight) == std::size(weights) &&
-                  choicesOf(Item::recordingFov) == std::size(recording_fov::choices) &&
-                  choicesOf(Item::airWebs) == 0 && choicesOf(Item::aimMarkers) == 0,
-              "lists: one choice per step; switches: the game's own ON and OFF");
-        check(choicesOf(Item::calibrate) == 2, "the calibration's switch names its two choices");
     });
     test("combat visuals can be hidden independently and persist without changing combat or web aiming", [] {
         using namespace vr_settings;
@@ -20834,6 +21196,26 @@ int main() {
         v.nearClipMm = 1000;
         check(sanitized(v).nearClipMm == 100, "near clip upper bound");
     });
+    test("recording smoothing uses OFF then strength 5 through 100 and survives saving", [] {
+        using namespace vr_settings;
+        Values v;check(v.recordingSmoothing==0,"smoothing started on");
+        for(int i=0;i<=20;++i) {
+            choose(Item::recordingSmoothing,i,v);
+            check(v.recordingSmoothing==i*5 && choice(Item::recordingSmoothing,v)==i,"strength did not round trip");
+            check(withTabOnly(Values{},tabOnlyText(v)).recordingSmoothing==v.recordingSmoothing,"strength did not save");
+        }
+        choose(Item::recordingSmoothing,21,v);check(v.recordingSmoothing==0,"strength did not cycle to off");
+        Mat4 initial{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
+        auto target=initial;const auto turn=Quat::around({1,1,1},.5f);
+        for(int r=0;r<3;++r) {const auto q=turn.rotate({initial[r*4],initial[r*4+1],initial[r*4+2]});target[r*4]=q.x;target[r*4+1]=q.y;target[r*4+2]=q.z;}
+        target[12]=.2f;target[13]=.3f;target[14]=.4f;
+        SpectatorSmoothing filter;filter.update(initial,.01f,true,150);
+        const auto smooth=filter.update(target,.01f,true,150);
+        near(smooth[12],.2f);near(smooth[13],.3f);near(smooth[14],.4f);
+        check(std::abs(smooth[0]-target[0])>.001f,"rotation was not smoothed");
+        filter.reset();const auto off=filter.update(target,.01f,false,150);
+        for(int i=0;i<16;++i)near(off[i],target[i]);
+    });
     test("recording FOV: off unless picked, kept with the tab's own settings, a lens that holds both eyes", [] {
         using namespace vr_settings;
         Values v;
@@ -20845,11 +21227,12 @@ int main() {
             check(withTabOnly(Values{}, tabOnlyText(v)).recordingFov == v.recordingFov,
                   "the recording FOV did not come back from the tab's own file");
         }
-        check(!choose(Item::recordingFov, 4, v) && !choose(Item::recordingFov, -1, v), "a choice out of range taken");
+        choose(Item::recordingFov,11,v);check(v.recordingFov==0,"FOV did not cycle to OFF");
+        choose(Item::recordingFov,-1,v);check(v.recordingFov==160,"reverse FOV cycle failed");
         // Off at 0 or below, else 130-150: a hand-written 100 shows as 130.
         check(withTabOnly(Values{}, "recording_fov=-20\n").recordingFov == 0 &&
-                  withTabOnly(Values{}, "recording_fov=100\n").recordingFov == 130 &&
-                  withTabOnly(Values{}, "recording_fov=170\n").recordingFov == 150,
+                  withTabOnly(Values{}, "recording_fov=100\n").recordingFov == 100 &&
+                  withTabOnly(Values{}, "recording_fov=170\n").recordingFov == 160,
               "the recording FOV's range");
         // The window's shape, at least the angle across, centred, and never
         // less than the eyes' lens (lopsided here, and taller than 16:9).
@@ -20883,7 +21266,7 @@ int main() {
                                        "swing_momentum=1\nrotation_response_ms=500\nhand_momentum=100\n"
                                        "angular_drag_ms=3000\nhand_speed_min_cm=100\nair_rotation_brake=1\n"
                                        "flips_in_combat=1\nbody_haptics_webs=1\nbody_haptics_wind=1\nbody_haptics_combat=1\n"
-                                       "body_haptics_movement=1\nrecording_fov=0\nui_style=0\ncombat_visuals=1\nblow_sounds=0\n"
+                                       "body_haptics_movement=1\nrecording_fov=0\nrecording_smoothing=0\nweb_range_m=100\nweb_speed=0\niplusd_elastic_web=0\niplusd_smart_anchor=1\niplusd_soft_release=0\niplusd_swing_assist=0\niplusd_two_hand_zip=0\niplusd_rope_steering=0\nslingshot_speed=32\nui_style=0\ncombat_visuals=1\nblow_sounds=0\n"
                                        "web_slingshot=0\nbetter_climbing=0\nheight_cm=0\nseated=0\neye_aim=0\n",
               "the defaults' text");
         Values changed = defaults;

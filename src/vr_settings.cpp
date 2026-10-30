@@ -33,7 +33,19 @@ constexpr const char* depthChoices[] = {"OFF", "LOW", "MEDIUM", "HIGH"};
 constexpr const char* nearClipChoices[] = {"1 CM", "1.5 CM", "2 CM", "3 CM", "5 CM", "7.5 CM", "10 CM"};
 static_assert(std::size(nearClipChoices) == std::size(nearClips));
 // RECORDING FOV: the least the monitor's view shows across (recording_fov.hpp).
-constexpr const char* recordingFovChoices[] = {"OFF", "130\xC2\xB0", "140\xC2\xB0", "150\xC2\xB0"};
+constexpr int assistSwitch[]={0,1};
+constexpr const char* assistChoices[]={"OFF","ON"};
+constexpr int comfortLevels[]={0,1,2,3};
+constexpr const char* comfortChoices[]={"OFF","LOW","MEDIUM","HIGH"};
+constexpr int webRanges[]={10,25,50,75,100,150,200,300,400,500,750,1000};
+constexpr const char* webRangeChoices[]={"10 M","25 M","50 M","75 M","100 M","150 M","200 M","300 M","400 M","500 M","750 M","1000 M"};
+constexpr int webSpeedModes[]={0,1,2,3};
+constexpr const char* webSpeedChoices[]={"OFF","SLOW","MEDIUM","FAST"};
+constexpr int smoothingLevels[] = {0,5,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95,100};
+constexpr const char* smoothingChoices[] = {"OFF","5","10","15","20","25","30","35","40","45","50","55","60","65","70","75","80","85","90","95","100"};
+constexpr int slingshotSpeeds[] = {20,32,40,50,65,100,150,200,300};
+constexpr const char* slingshotSpeedChoices[] = {"20 M/S","32 M/S","40 M/S","50 M/S","65 M/S","100 M/S","150 M/S","200 M/S","300 M/S"};
+constexpr const char* recordingFovChoices[] = {"OFF","70","80","90","100","110","120","130","140","150","160"};
 static_assert(std::size(recordingFovChoices) == std::size(recording_fov::choices));
 // UI STYLE, a list (ui_style.hpp's UiStyle in order) so that a style can
 // come after them: COMIC, the printed marks, or TECH, the game's own look.
@@ -62,8 +74,8 @@ constexpr int automaticMinimumSpeeds[] = {3, 5, 8, 12, 16};
 constexpr const char* automaticMinimumChoices[] = {"3 M/S", "5 M/S", "8 M/S", "12 M/S", "16 M/S"};
 constexpr int automaticResponses[] = {100, 200, 350, 500, 750};
 constexpr const char* automaticResponseChoices[] = {"100 MS", "200 MS", "350 MS", "500 MS", "750 MS"};
-constexpr int automaticHandStrengths[] = {25, 50, 75, 100, 150, 200};
-constexpr const char* automaticHandStrengthChoices[] = {"25%", "50%", "75%", "100%", "150%", "200%"};
+constexpr int automaticHandStrengths[] = {0,25, 50, 75, 100, 150, 200};
+constexpr const char* automaticHandStrengthChoices[] = {"0%","25%", "50%", "75%", "100%", "150%", "200%"};
 constexpr int automaticFalloffs[] = {500, 1000, 1500, 2000, 3000};
 constexpr const char* automaticFalloffChoices[] = {"FAST", "QUICK", "MEDIUM", "SLOW", "VERY SLOW"};
 constexpr int automaticHandThresholds[] = {50, 100, 150, 200, 300};
@@ -111,6 +123,17 @@ std::span<const int> steps(Item item) {
         return nearClips;
     case Item::recordingFov:
         return recording_fov::choices;
+    case Item::recordingSmoothing: return smoothingLevels;
+    case Item::webRange:return webRanges;
+    case Item::webSpeed:return webSpeedModes;
+    case Item::smartAnchor:
+    case Item::twoHandZip:
+    case Item::ropeSteering:
+    case Item::swingAssist:return assistSwitch;
+    case Item::elasticWeb:
+    case Item::softRelease:
+        return comfortLevels;
+    case Item::slingshotSpeed: return slingshotSpeeds;
     case Item::uiStyle:
         return uiStyles;
     case Item::blowSounds:
@@ -164,6 +187,18 @@ float numberOf(Item item, const Values& v) {
         return static_cast<float>(v.nearClipMm);
     case Item::recordingFov:
         return static_cast<float>(v.recordingFov);
+    case Item::recordingSmoothing: return static_cast<float>(v.recordingSmoothing);
+    case Item::webRange:return static_cast<float>(v.webRange);
+    case Item::webSpeed:return static_cast<float>(v.webSpeed);
+    case Item::elasticWeb:return static_cast<float>(v.elasticWeb);
+    case Item::smartAnchor:return static_cast<float>(v.smartAnchor);
+    case Item::softRelease:return static_cast<float>(v.softRelease);
+    case Item::swingAssist:return static_cast<float>(v.swingAssist);
+    case Item::twoHandZip:return static_cast<float>(v.twoHandZip);
+    case Item::ropeSteering:return static_cast<float>(v.ropeSteering);
+
+
+    case Item::slingshotSpeed: return static_cast<float>(v.slingshotSpeed);
     case Item::uiStyle:
         return static_cast<float>(v.uiStyle);
     case Item::blowSounds:
@@ -256,6 +291,15 @@ Values sanitized(Values v) {
     v.screenDepth = std::clamp(v.screenDepth, 0, 3);
     v.nearClipMm = std::clamp(v.nearClipMm, nearClips[0], std::end(nearClips)[-1]);
     v.recordingFov = recording_fov::sanitized(v.recordingFov);
+    v.recordingSmoothing=std::clamp(v.recordingSmoothing,0,100);
+    v.elasticWeb=std::clamp(v.elasticWeb,0,3);
+    v.smartAnchor=std::clamp(v.smartAnchor,0,1);
+    v.twoHandZip=std::clamp(v.twoHandZip,0,1);
+    v.ropeSteering=std::clamp(v.ropeSteering,0,1);
+    v.swingAssist=std::clamp(v.swingAssist,0,1);
+    v.softRelease=std::clamp(v.softRelease,0,3);
+    v.webRange=std::clamp(v.webRange,10,1000);v.webSpeed=std::clamp(v.webSpeed,0,3);
+    v.slingshotSpeed=std::clamp(v.slingshotSpeed,20,300);
     v.uiStyle = std::clamp(v.uiStyle, uiStyles[0], std::end(uiStyles)[-1]);
     v.blowSounds = std::clamp(v.blowSounds, blowSoundSteps[0], std::end(blowSoundSteps)[-1]);
     v.heightCm = v.heightCm <= 0 ? 0 : std::clamp(v.heightCm, seated::minHeightCm, seated::maxHeightCm);
@@ -265,14 +309,22 @@ Values sanitized(Values v) {
     v.automaticSpeed = std::clamp(v.automaticSpeed, 90, 360);
     v.automaticMinimumSpeed = std::clamp(v.automaticMinimumSpeed, 3, 16);
     v.automaticResponse = std::clamp(v.automaticResponse, 100, 750);
-    v.automaticHandStrength = std::clamp(v.automaticHandStrength, 25, 200);
+    v.automaticHandStrength = std::clamp(v.automaticHandStrength, 0, 200);
     v.automaticFalloff = std::clamp(v.automaticFalloff, 500, 3000);
     v.automaticHandThreshold = std::clamp(v.automaticHandThreshold, 50, 300);
     return v;
 }
-const std::array<Row, 52>& rows() {
-    // The help fits the game's description column beside the rows.
-    static const std::array<Row, 52> all{{
+const std::array<Row,70>& rows() {
+    static const std::array<Row,70> all{{
+        {Item::none,"WEB FEEL AND ASSIST",nullptr,{},Place::iplusd},
+        {Item::elasticWeb,"ELASTIC WEB","Web stretches a little to catch you gently. Higher makes it softer.",comfortChoices,Place::iplusd},
+        {Item::smartAnchor,"SMART ANCHOR","Helps slightly missed shots find a nearby building surface.",assistChoices,Place::iplusd},
+        {Item::softRelease,"SOFT RELEASE","After letting go, the web's pull fades out gently. Higher lasts longer.",comfortChoices,Place::iplusd},
+
+        {Item::swingAssist,"SWING ASSIST","Softens speed into obstacles without choosing a new route. Collision stays on.",assistChoices,Place::iplusd},
+        {Item::none,"HAND GESTURES",nullptr,{},Place::iplusd},
+        {Item::twoHandZip,"TWO HAND WEB ZIP","Web one spot with both hands, then pull both back quickly to zip toward it.",assistChoices,Place::iplusd},
+        {Item::ropeSteering,"HAND ROPE STEERING","Grab your web with the free hand, then pull it sideways to steer your swing.",assistChoices,Place::iplusd},
         {Item::none, "WEBS", nullptr, {}},
         {Item::webStyle, "WEB STYLE",
          "Arcade: webs pass lamp posts, signs and cars, and swings stay above the street.", webStyleChoices},
@@ -285,10 +337,6 @@ const std::array<Row, 52>& rows() {
         {Item::swingSpeed, "SWING SPEED LIMIT", "How fast a swing can carry you.", swingChoices},
         {Item::weight, "WEIGHT", "How heavy you are while swinging and after letting go. 100% is real gravity.",
          weightChoices},
-        {Item::webSlingshot, "WEB SLINGSHOT",
-         "No auto jump. Draw two fixed webs, hold for vibration, release both to launch.", {}},
-        {Item::betterClimbing, "BETTER CLIMBING",
-         "Take one web in both hands, then pull hand over hand to keep climbing it.", {}},
         {Item::none, "COMFORT", nullptr, {}},
         {Item::snapTurn, "SNAP TURN", "How far a flick of the right stick turns you. Off: no snap turning.",
          snapChoices},
@@ -322,11 +370,6 @@ const std::array<Row, 52>& rows() {
          "Spidy's own marks, gadget wheel and meters: comic print, or tech like the HUD.", uiStyleChoices},
         {Item::combatVisuals, "COMBAT VISUALS",
          "Show punch arrows, target rings, hit effects and KO text. Spider-Sense stays on.", {}},
-        {Item::nearClip, "NEAR CLIP",
-         "How near your eyes things still show. Nearer keeps your hands in view.", nearClipChoices},
-        {Item::recordingFov, "RECORDING FOV",
-         "A wider view on the monitor, to record. Costs frame rate; no Spidy marks there.",
-         recordingFovChoices},
         {Item::none, "BODY", nullptr, {}},
         {Item::calibrate, "CALIBRATE BODY", "Fit Spider-Man to you: pick ON RESUME, then hold both triggers in a T-pose.",
          calibrateChoices},
@@ -347,31 +390,46 @@ const std::array<Row, 52>& rows() {
          "Gently bank the view with the body on horizontal momentum wall runs.", {}},
         {Item::eyeAim, "EYE AIM", "Web balls and zips go where your eyes look. Needs a headset with eye tracking.",
          eyeAimChoices},
+        {Item::none,"RECORDING",nullptr,{},Place::iplusd},
+        {Item::recordingFov,"RECORDING FOV","Recording view: OFF, then 70 to 160 degrees. Does not change headset FOV.",recordingFovChoices,Place::iplusd},
+        {Item::recordingSmoothing,"FOV SMOOTHING","Recording rotation only. Higher is softer. No horizon lock. Requires FOV on.",smoothingChoices,Place::iplusd},
+        {Item::none,"CAMERA",nullptr,{},Place::iplusd},
+        {Item::nearClip, "NEAR CLIP",
+         "How near your eyes things still show. Nearer keeps your hands in view.", nearClipChoices,Place::iplusd},
+        {Item::none,"REALISTIC MOVEMENT",nullptr,{},Place::iplusd},
         {Item::realisticFlips, "REALISTIC FLIPS",
-         "Momentum rotation from arms and webs. FLIPS also enables left-stick steering.", {}},
+         "Momentum rotation from arms and webs. FLIPS also enables left-stick steering.", {},Place::iplusd},
         {Item::automaticStrength, "ROTATION STRENGTH",
-         "How strongly the body follows the web direction. Heading stays free.", automaticStrengthChoices},
+         "How strongly the body follows the web direction. Heading stays free.", automaticStrengthChoices,Place::iplusd},
         {Item::automaticSpeed, "MAX ROTATION SPEED",
-         "Maximum automatic turning speed, including release flips.", automaticSpeedChoices},
+         "Maximum automatic turning speed, including release flips.", automaticSpeedChoices,Place::iplusd},
         {Item::automaticMinimumSpeed, "MINIMUM FLIGHT SPEED",
-         "Start automatic rotation only above this travel speed.", automaticMinimumChoices, Place::launcher},
+         "Start automatic rotation only above this travel speed.", automaticMinimumChoices,Place::iplusd},
         {Item::automaticReleaseFlip, "SWING MOMENTUM",
-         "Carry orbital momentum when the last web is released. No preset flip.", {}},
+         "Carry orbital momentum when the last web is released. No preset flip.", {},Place::iplusd},
         {Item::automaticResponse, "ROTATION RESPONSE",
-         "Longer response gives gentler acceleration and braking.", automaticResponseChoices,
-         Place::launcher},
+         "Longer response gives gentler acceleration and braking.", automaticResponseChoices,Place::iplusd},
         {Item::automaticHandStrength, "HAND MOMENTUM",
-         "How much arm movement changes your angular momentum in the air.", automaticHandStrengthChoices},
+         "How much arm movement changes your angular momentum in the air.", automaticHandStrengthChoices,Place::iplusd},
         {Item::automaticFalloff, "ANGULAR DRAG",
-         "How quickly rotation slows without more hand or web input.", automaticFalloffChoices,
-         Place::launcher},
+         "How quickly rotation slows without more hand or web input.", automaticFalloffChoices,Place::iplusd},
         {Item::automaticHandThreshold, "MINIMUM HAND SPEED",
          "Ignore hand movements slower than this. Faster gestures add momentum.",
-         automaticHandThresholdChoices, Place::launcher},
+         automaticHandThresholdChoices,Place::iplusd},
         {Item::automaticAirBrake, "AIR ROTATION BRAKE",
-         "Press A in the air to stop momentum and smoothly return upright.", {}},
-        {Item::automaticCombat, "FLIPS IN COMBAT",
-         "Off: with enemies near, arms and webs stop turning you and you come upright.", {}},
+         "Press A in the air to stop momentum and smoothly return upright.", {},Place::iplusd},
+        {Item::automaticCombat, "FLIPS IN COMBAT (added by Ilya)",
+         "Off: with enemies near, arms and webs stop turning you and you come upright.", {},Place::iplusd},
+        {Item::none,"WEB TRAVEL",nullptr,{},Place::iplusd},
+        {Item::webRange,"WEB RANGE","Maximum reach for new webs. Turn open-air webs off for real surfaces only.",webRangeChoices,Place::iplusd},
+        {Item::webSpeed,"WEB SPEED","Off: instant. Slow, medium or fast flight; distance sets arrival and soft catch.",webSpeedChoices,Place::iplusd},
+        {Item::none,"SLINGSHOT",nullptr,{},Place::iplusd},
+        {Item::webSlingshot, "WEB SLINGSHOT",
+         "No auto jump. Draw two fixed webs, hold for vibration, release both to launch.", {},Place::iplusd},
+        {Item::slingshotSpeed,"SLINGSHOT SPEED","Full-charge launch speed, independent of the normal swing speed limit.",slingshotSpeedChoices,Place::iplusd},
+        {Item::none,"CLIMBING",nullptr,{},Place::iplusd},
+        {Item::betterClimbing, "BETTER CLIMBING",
+         "Take one web in both hands, then pull hand over hand to keep climbing it.", {},Place::iplusd},
     }};
     return all;
 }
@@ -397,10 +455,24 @@ bool choose(Item item, int index, Values& v) {
         return *on != was;
     }
     const auto s = steps(item);
+    if((item==Item::recordingFov || item==Item::recordingSmoothing) && !s.empty())
+        index=(index%static_cast<int>(s.size())+static_cast<int>(s.size()))%static_cast<int>(s.size());
     if (index < 0 || index >= static_cast<int>(s.size()))
         return false;
     const Values before = v;
     switch (item) {
+    case Item::recordingSmoothing: v.recordingSmoothing=s[index]; break;
+    case Item::webRange:v.webRange=s[index];break;
+    case Item::webSpeed:v.webSpeed=s[index];break;
+    case Item::elasticWeb:v.elasticWeb=s[index];break;
+    case Item::smartAnchor:v.smartAnchor=s[index];break;
+    case Item::softRelease:v.softRelease=s[index];break;
+    case Item::swingAssist:v.swingAssist=s[index];break;
+    case Item::twoHandZip:v.twoHandZip=s[index];break;
+    case Item::ropeSteering:v.ropeSteering=s[index];break;
+
+
+    case Item::slingshotSpeed: v.slingshotSpeed=s[index]; break;
     case Item::swingSpeed:
         v.swingSpeed = static_cast<float>(s[index]);
         break;
@@ -506,6 +578,18 @@ constexpr TabOnly tabOnly[] = {
     {"body_haptics_combat", &Values::hapticCombat, nullptr},
     {"body_haptics_movement", &Values::hapticMovement, nullptr},
     {"recording_fov", nullptr, &Values::recordingFov},
+    {"recording_smoothing",nullptr,&Values::recordingSmoothing},
+    {"web_range_m",nullptr,&Values::webRange},
+    {"web_speed",nullptr,&Values::webSpeed},
+    {"iplusd_elastic_web",nullptr,&Values::elasticWeb},
+    {"iplusd_smart_anchor",nullptr,&Values::smartAnchor},
+    {"iplusd_soft_release",nullptr,&Values::softRelease},
+    {"iplusd_swing_assist",nullptr,&Values::swingAssist},
+    {"iplusd_two_hand_zip",nullptr,&Values::twoHandZip},
+    {"iplusd_rope_steering",nullptr,&Values::ropeSteering},
+
+
+    {"slingshot_speed",nullptr,&Values::slingshotSpeed},
     {"ui_style", nullptr, &Values::uiStyle},
     {"combat_visuals", &Values::combatVisuals, nullptr},
     {"blow_sounds", nullptr, &Values::blowSounds},

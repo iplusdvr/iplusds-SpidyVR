@@ -2,6 +2,7 @@
 #include "math.hpp"
 #include <cstdint>
 #include <optional>
+#include <stdexcept>
 #include <vector>
 
 namespace spidy {
@@ -268,6 +269,13 @@ struct Web {
     // `taken` and not shot by it.
     std::uint32_t strand{};
     bool taken{};
+    Vec3 shotOrigin{};
+    float flightLeft{},flightTotal{},engageAge{};
+    bool catching{};
+    bool ready() const {return attached && flightLeft<=0;}
+    float progress() const {return flightTotal>0?std::clamp(1-flightLeft/flightTotal,0.f,1.f):1;}
+    float coupling() const {const float t=flightTotal>0?std::clamp(engageAge/.18f,0.f,1.f):1;return t*t*(3-2*t);}
+    Vec3 tip() const {return shotOrigin+(end()-shotOrigin)*progress();}
     // Where the web sticks.
     Vec3 end() const {
         return bent ? bends[0].from : anchor;
@@ -307,6 +315,7 @@ enum class EventKind {
     Join,     // a hand took hold of the other hand's web
     Pass,     // an arcade web went through a thin or loose thing: shot past one, or swung past one
     WallGrip, // a palm stuck to the wall; one contact pulse in that hand
+    Shoot, // a visible shot in flight; not yet a physical attachment
     Slingshot, // both drawn webs released: strength is the stored charge
 };
 struct Event {
@@ -341,6 +350,14 @@ class Swing {
             clearSlingshot();
         }
     }
+    void setSlingshotSpeed(float speed);
+    void webTravel(float range,int mode);
+    bool webTravelEnabled() const {return webSpeedMode_!=0;}
+    bool climbTakeoff() const { return climbTakeoff_ && betterClimbing_ && ((webs_[0].attached&&hands_[0].ropeClimbing)||(webs_[1].attached&&hands_[1].ropeClimbing)); }
+    bool betterClimbingEnabled() const { return betterClimbing_; }
+    bool slingshotFlying() const { return slingshotFlight_; }
+    bool boostedFlight() const { return slingshotFlight_ && slingshotSpeed_>65; }
+    float speedLimit() const { return slingshotFlight_?std::max(config_.maxSpeed,slingshotSpeed_):config_.maxSpeed; }
     bool slingshotEnabled() const {
         return slingshotEnabled_;
     }
@@ -515,9 +532,26 @@ class Swing {
     // Hand `hand` is free and on the other hand's web, as of the latest
     // input: its grip press would take hold of that web, and shoot none.
     bool onStrand(int hand) const;
+    bool onStrand(int hand, const Input& current) const;
     // Hand `hand`'s web holds the body when taut: any web but the longer
     // rope of two hands on one web.
     bool bears(int hand) const;
+    void allowGestures(bool zip,bool steering) {
+        if(twoHandZip_!=zip||ropeSteering_!=steering)resetGestures();
+        twoHandZip_=zip;ropeSteering_=steering;
+    }
+    bool gestureTakeoff() const {return gestureTakeoff_;}
+    Vec3 gestureLaunch() const {return gestureLaunch_;}
+    bool gesturesEnabled() const {return twoHandZip_||ropeSteering_;}
+
+    void allowSwingAssist(bool on) {swingAssist_=on;if(!on){assistWay_={};assistFlight_=0;}}
+    void comfort(int elastic,int smart,int release) {
+        if(elastic<0||elastic>3||smart<0||smart>1||release<0||release>3)
+            throw std::invalid_argument("Invalid swing comfort settings");
+        elasticWeb_=elastic;smartAnchor_=smart;softRelease_=release;
+        if(!release) {releasePull_={};releaseLeft_=0;}
+    }
+
     const SwingConfig& config() const {
         return config_;
     }
@@ -529,10 +563,26 @@ class Swing {
     void clearSlingshot();
     void slingshot(float dt, const Input&, const WorldQueries&);
     bool slingshotEnabled_{}, slingshotPair_{}, slingshotReleasing_{};
+    bool slingshotFlight_{}, slingshotAirborne_{}, climbTakeoff_{};
+    int webSpeedMode_{};
+    int elasticWeb_{},smartAnchor_=1,softRelease_{};
+    bool swingAssist_{};Vec3 assistWay_{};float assistFlight_{};
+    void avoidObstacles(float dt,const Input&,const WorldQueries&);
+    Vec3 releasePull_{};float releaseLeft_{};
+    float slingshotSpeed_=32;
     Vec3 slingshotHands_[2]{}, slingshotEnds_[2]{};
     uint64_t slingshotSurfaces_[2]{};
     float slingshotCharge_{}, slingshotHold_{}, slingshotRelease_{}, slingshotYaw_{};
     bool betterClimbing_{};
+    bool twoHandZip_{},ropeSteering_{};
+    bool gestureSample_{},zipUsed_{},gestureTakeoff_{};
+    Vec3 gesturePrevious_[2]{},gestureLaunch_{};
+    uint64_t gestureStrands_[2]{};
+    float zipGestureBlock_{},gestureYaw_{},zipPull_[2]{},zipWindow_{};
+    void resetGestures();
+    void gestures(float dt,const Input&,const WorldQueries&);
+    bool twoHandTarget() const;
+
     struct HandState {
         // held: grip squeezed, with release hysteresis. A web shoots only on the
         // press that sets it, so a lost web never re-fires while the grip stays held.

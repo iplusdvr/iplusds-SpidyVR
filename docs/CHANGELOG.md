@@ -1,3 +1,11 @@
+# iplusd experimental changes
+
+Built on **official SpidyVR 0.6.0**. For the full list of changes introduced in 0.6.0 and all official features, follow the [official SpidyVR page](https://github.com/IlyaMez/SpidyVR). The additions below are iplusd's contributions; original and upstream features remain credited to Ilya and their respective contributors.
+
+[Experimental 0.6.0 release notes](releases/v0.6.0-iplusd.1.md)
+
+---
+
 # Spidy changelog
 
 Every build, newest first, with what changed, why, and what was measured.
